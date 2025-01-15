@@ -90,21 +90,9 @@ Future<GetMessagesResult> getMessages(ApiConnection connection, {
   bool? applyMarkdown,
   // bool? useFirstUnreadAnchor // omitted because deprecated
 }) {
-  if (narrow.any((element) => element is ApiNarrowDm)) {
-    final supportsOperatorDm = connection.zulipFeatureLevel! >= 177; // TODO(server-7)
-    narrow = narrow.map((element) => switch (element) {
-      ApiNarrowDm() => element.resolve(legacy: !supportsOperatorDm),
-      _             => element,
-    }).toList();
-  }
   return connection.get('getMessages', GetMessagesResult.fromJson, 'messages', {
-    'narrow': narrow,
-    'anchor': switch (anchor) {
-      NumericAnchor(:var messageId) => messageId,
-      AnchorCode.newest             => RawParameter('newest'),
-      AnchorCode.oldest             => RawParameter('oldest'),
-      AnchorCode.firstUnread        => RawParameter('first_unread'),
-    },
+    'narrow': resolveDmElements(narrow, connection.zulipFeatureLevel!),
+    'anchor': RawParameter(anchor.toJson()),
     if (includeAnchor != null) 'include_anchor': includeAnchor,
     'num_before': numBefore,
     'num_after': numAfter,
@@ -119,17 +107,28 @@ Future<GetMessagesResult> getMessages(ApiConnection connection, {
 sealed class Anchor {
   /// This const constructor allows subclasses to have const constructors.
   const Anchor();
+
+  String toJson();
 }
 
 /// An anchor value for [getMessages] other than a specific message ID.
 ///
 /// https://zulip.com/api/get-messages#parameter-anchor
-enum AnchorCode implements Anchor { newest, oldest, firstUnread }
+@JsonEnum(fieldRename: FieldRename.snake, alwaysCreate: true)
+enum AnchorCode implements Anchor {
+  newest, oldest, firstUnread;
+
+  @override
+  String toJson() => _$AnchorCodeEnumMap[this]!;
+}
 
 /// A specific message ID, used as an anchor in [getMessages].
 class NumericAnchor extends Anchor {
   const NumericAnchor(this.messageId);
   final int messageId;
+
+  @override
+  String toJson() => messageId.toString();
 }
 
 @JsonSerializable(fieldRename: FieldRename.snake)
@@ -178,36 +177,58 @@ Future<SendMessageResult> sendMessage(
   required String content,
   String? queueId,
   String? localId,
+  bool? readBySender,
 }) {
   final supportsTypeDirect = connection.zulipFeatureLevel! >= 174; // TODO(server-7)
+  final supportsReadBySender = connection.zulipFeatureLevel! >= 236; // TODO(server-8)
   return connection.post('sendMessage', SendMessageResult.fromJson, 'messages', {
-    if (destination is StreamDestination) ...{
-      'type': RawParameter('stream'),
-      'to': destination.streamId,
-      'topic': RawParameter(destination.topic),
-    } else if (destination is DmDestination) ...{
-      'type': supportsTypeDirect ? RawParameter('direct') : RawParameter('private'),
-      'to': destination.userIds,
-    } else ...(
-      throw Exception('impossible destination') // TODO(dart-3) show this statically
-    ),
+    ...(switch (destination) {
+      StreamDestination() => {
+        'type': RawParameter('stream'),
+        'to': destination.streamId,
+        'topic': RawParameter(destination.topic),
+      },
+      DmDestination() => {
+        'type': supportsTypeDirect ? RawParameter('direct') : RawParameter('private'),
+        'to': destination.userIds,
+      }}),
     'content': RawParameter(content),
-    if (queueId != null) 'queue_id': queueId,
-    if (localId != null) 'local_id': localId,
+    if (queueId != null) 'queue_id': queueId, // TODO should this use RawParameter?
+    if (localId != null) 'local_id': localId, // TODO should this use RawParameter?
+    if (readBySender != null) 'read_by_sender': readBySender,
+  },
+  overrideUserAgent: switch ((supportsReadBySender, readBySender)) {
+    // Old servers use the user agent to decide if we're a UI client
+    // and so whether the message should be marked as read for its author
+    // (see #440). We are a UI client; so, use a value those servers will
+    // interpret correctly. With newer servers, passing `readBySender: true`
+    // gives the same result.
+    // TODO(#467) include platform, platform version, and app version
+    (false, _   ) => 'ZulipMobile/flutter',
+
+    // According to the doc, a user-agent heuristic is still used in this case:
+    //   https://zulip.com/api/send-message#parameter-read_by_sender
+    // TODO find out if our default user agent would work with that.
+    // TODO(#467) include platform, platform version, and app version
+    (true,  null) => 'ZulipMobile/flutter',
+
+    _             => null,
   });
 }
 
 /// Which conversation to send a message to, in [sendMessage].
 ///
 /// This is either a [StreamDestination] or a [DmDestination].
-sealed class MessageDestination {}
+sealed class MessageDestination {
+  const MessageDestination();
+}
 
 /// A conversation in a stream, for specifying to [sendMessage].
 ///
 /// The server accepts a stream name as an alternative to a stream ID,
 /// but this binding currently doesn't.
 class StreamDestination extends MessageDestination {
-  StreamDestination(this.streamId, this.topic);
+  const StreamDestination(this.streamId, this.topic);
 
   final int streamId;
   final String topic;
@@ -218,7 +239,7 @@ class StreamDestination extends MessageDestination {
 /// The server accepts a list of Zulip API emails as an alternative to
 /// a list of user IDs, but this binding currently doesn't.
 class DmDestination extends MessageDestination {
-  DmDestination({required this.userIds});
+  const DmDestination({required this.userIds});
 
   final List<int> userIds;
 }
@@ -226,11 +247,9 @@ class DmDestination extends MessageDestination {
 @JsonSerializable(fieldRename: FieldRename.snake)
 class SendMessageResult {
   final int id;
-  final String? deliverAt;
 
   SendMessageResult({
     required this.id,
-    this.deliverAt,
   });
 
   factory SendMessageResult.fromJson(Map<String, dynamic> json) =>
@@ -245,9 +264,10 @@ Future<UploadFileResult> uploadFile(
   required Stream<List<int>> content,
   required int length,
   required String filename,
+  required String? contentType,
 }) {
   return connection.postFileFromStream('uploadFile', UploadFileResult.fromJson, 'user_uploads',
-    content, length, filename: filename);
+    content, length, filename: filename, contentType: contentType);
 }
 
 @JsonSerializable(fieldRename: FieldRename.snake)
@@ -289,5 +309,150 @@ Future<void> removeReaction(ApiConnection connection, {
     'emoji_name': RawParameter(emojiName),
     'emoji_code': RawParameter(emojiCode),
     'reaction_type': RawParameter(reactionType.toJson()),
+  });
+}
+
+/// https://zulip.com/api/update-message-flags
+Future<UpdateMessageFlagsResult> updateMessageFlags(ApiConnection connection, {
+  required List<int> messages,
+  required UpdateMessageFlagsOp op,
+  required MessageFlag flag,
+}) {
+  return connection.post('updateMessageFlags', UpdateMessageFlagsResult.fromJson, 'messages/flags', {
+    'messages': messages,
+    'op': RawParameter(op.toJson()),
+    'flag': RawParameter(flag.toJson()),
+  });
+}
+
+/// An `op` value for [updateMessageFlags] and [updateMessageFlagsForNarrow].
+@JsonEnum(fieldRename: FieldRename.snake, alwaysCreate: true)
+enum UpdateMessageFlagsOp {
+  add,
+  remove;
+
+  String toJson() => _$UpdateMessageFlagsOpEnumMap[this]!;
+}
+
+@JsonSerializable(fieldRename: FieldRename.snake)
+class UpdateMessageFlagsResult {
+  final List<int> messages;
+
+  UpdateMessageFlagsResult({
+    required this.messages,
+  });
+
+  factory UpdateMessageFlagsResult.fromJson(Map<String, dynamic> json) =>
+    _$UpdateMessageFlagsResultFromJson(json);
+
+  Map<String, dynamic> toJson() => _$UpdateMessageFlagsResultToJson(this);
+}
+
+/// https://zulip.com/api/update-message-flags-for-narrow
+///
+/// This binding only supports feature levels 155+.
+// TODO(server-6) remove FL 155+ mention in doc, and the related `assert`
+Future<UpdateMessageFlagsForNarrowResult> updateMessageFlagsForNarrow(ApiConnection connection, {
+  required Anchor anchor,
+  bool? includeAnchor,
+  required int numBefore,
+  required int numAfter,
+  required ApiNarrow narrow,
+  required UpdateMessageFlagsOp op,
+  required MessageFlag flag,
+}) {
+  assert(connection.zulipFeatureLevel! >= 155);
+  return connection.post('updateMessageFlagsForNarrow', UpdateMessageFlagsForNarrowResult.fromJson, 'messages/flags/narrow', {
+    'anchor': RawParameter(anchor.toJson()),
+    if (includeAnchor != null) 'include_anchor': includeAnchor,
+    'num_before': numBefore,
+    'num_after': numAfter,
+    'narrow': resolveDmElements(narrow, connection.zulipFeatureLevel!),
+    'op': RawParameter(op.toJson()),
+    'flag': RawParameter(flag.toJson()),
+  });
+}
+
+@JsonSerializable(fieldRename: FieldRename.snake)
+class UpdateMessageFlagsForNarrowResult {
+  final int processedCount;
+  final int updatedCount;
+  final int? firstProcessedId;
+  final int? lastProcessedId;
+  final bool foundOldest;
+  final bool foundNewest;
+
+  UpdateMessageFlagsForNarrowResult({
+    required this.processedCount,
+    required this.updatedCount,
+    required this.firstProcessedId,
+    required this.lastProcessedId,
+    required this.foundOldest,
+    required this.foundNewest,
+  });
+
+  factory UpdateMessageFlagsForNarrowResult.fromJson(Map<String, dynamic> json) =>
+    _$UpdateMessageFlagsForNarrowResultFromJson(json);
+
+  Map<String, dynamic> toJson() => _$UpdateMessageFlagsForNarrowResultToJson(this);
+}
+
+/// https://zulip.com/api/mark-all-as-read
+///
+/// This binding is deprecated, in FL 155+ use
+/// [updateMessageFlagsForNarrow] instead.
+// TODO(server-6): Remove as deprecated by updateMessageFlagsForNarrow
+//
+// For FL < 153 this call was atomic on the server and would
+// not mark any messages as read if it timed out.
+// From FL 153 and onward the server started processing
+// in batches so progress could still be made in the event
+// of a timeout interruption. Thus, in FL 153 this call
+// started returning `result: partially_completed` and
+// `code: REQUEST_TIMEOUT` for timeouts.
+//
+// In FL 211 the `partially_completed` variant of
+// `result` was removed, the string `code` field also
+// removed, and a boolean `complete` field introduced.
+//
+// For full support of this endpoint we would need three
+// variants of the return structure based on feature
+// level (`{}`, `{code: string}`, and `{complete: bool}`)
+// as well as handling of `partially_completed` variant
+// of `result` in `lib/api/core.dart`. For simplicity we
+// ignore these return values.
+//
+// We don't use this method for FL 155+ (it is replaced
+// by `updateMessageFlagsForNarrow`) so there are only
+// two versions (FL 153 and FL 154) affected.
+Future<void> markAllAsRead(ApiConnection connection) {
+  return connection.post('markAllAsRead', (_) {}, 'mark_all_as_read', {});
+}
+
+/// https://zulip.com/api/mark-stream-as-read
+///
+/// This binding is deprecated, in FL 155+ use
+/// [updateMessageFlagsForNarrow] instead.
+// TODO(server-6): Remove as deprecated by updateMessageFlagsForNarrow
+Future<void> markStreamAsRead(ApiConnection connection, {
+  required int streamId,
+}) {
+  return connection.post('markStreamAsRead', (_) {}, 'mark_stream_as_read', {
+    'stream_id': streamId,
+  });
+}
+
+/// https://zulip.com/api/mark-topic-as-read
+///
+/// This binding is deprecated, in FL 155+ use
+/// [updateMessageFlagsForNarrow] instead.
+// TODO(server-6): Remove as deprecated by updateMessageFlagsForNarrow
+Future<void> markTopicAsRead(ApiConnection connection, {
+  required int streamId,
+  required String topicName,
+}) {
+  return connection.post('markTopicAsRead', (_) {}, 'mark_topic_as_read', {
+    'stream_id': streamId,
+    'topic_name': RawParameter(topicName),
   });
 }

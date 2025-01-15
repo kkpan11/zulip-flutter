@@ -260,7 +260,7 @@ class StickyHeaderListView extends BoxScrollView {
 
   @override
   Widget buildChildLayout(BuildContext context) {
-    return _SliverStickyHeaderList(
+    return SliverStickyHeaderList(
       headerPlacement: (reverseHeader ^ reverse)
         ? HeaderPlacement.scrollingEnd : HeaderPlacement.scrollingStart,
       delegate: childrenDelegate);
@@ -272,25 +272,48 @@ class StickyHeaderListView extends BoxScrollView {
 /// For example if the list scrolls to the left, then
 /// [scrollingStart] means the right edge of the list, regardless of whether
 /// the ambient [Directionality] is RTL or LTR.
-enum HeaderPlacement { scrollingStart, scrollingEnd }
+enum HeaderPlacement {
+  scrollingStart,
+  scrollingEnd;
 
-class _SliverStickyHeaderList extends RenderObjectWidget {
-  _SliverStickyHeaderList({
+  _HeaderGrowthPlacement _byGrowth(GrowthDirection growthDirection) {
+    return switch ((growthDirection, this)) {
+      (GrowthDirection.forward, scrollingStart) => _HeaderGrowthPlacement.growthStart,
+      (GrowthDirection.forward, scrollingEnd)   => _HeaderGrowthPlacement.growthEnd,
+      (GrowthDirection.reverse, scrollingStart) => _HeaderGrowthPlacement.growthEnd,
+      (GrowthDirection.reverse, scrollingEnd)   => _HeaderGrowthPlacement.growthStart,
+    };
+  }
+}
+
+/// Where a header goes, in terms of the list sliver's growth direction.
+///
+/// This will agree with the [HeaderPlacement] value if the growth direction
+/// is [GrowthDirection.forward], but contrast with it if the growth direction
+/// is [GrowthDirection.reverse].  See [HeaderPlacement._byGrowth].
+enum _HeaderGrowthPlacement {
+  growthStart,
+  growthEnd
+}
+
+class SliverStickyHeaderList extends RenderObjectWidget {
+  SliverStickyHeaderList({
+    super.key,
     required this.headerPlacement,
     required SliverChildDelegate delegate,
-  }) : child = _SliverStickyHeaderListInner(
+  }) : _child = _SliverStickyHeaderListInner(
     headerPlacement: headerPlacement,
     delegate: delegate,
   );
 
   final HeaderPlacement headerPlacement;
-  final _SliverStickyHeaderListInner child;
+  final _SliverStickyHeaderListInner _child;
 
   @override
-  _SliverStickyHeaderListElement createElement() => _SliverStickyHeaderListElement(this);
+  RenderObjectElement createElement() => _SliverStickyHeaderListElement(this);
 
   @override
-  _RenderSliverStickyHeaderList createRenderObject(BuildContext context) {
+  RenderSliver createRenderObject(BuildContext context) {
     final element = context as _SliverStickyHeaderListElement;
     return _RenderSliverStickyHeaderList(element: element);
   }
@@ -299,10 +322,10 @@ class _SliverStickyHeaderList extends RenderObjectWidget {
 enum _SliverStickyHeaderListSlot { header, list }
 
 class _SliverStickyHeaderListElement extends RenderObjectElement {
-  _SliverStickyHeaderListElement(_SliverStickyHeaderList super.widget);
+  _SliverStickyHeaderListElement(SliverStickyHeaderList super.widget);
 
   @override
-  _SliverStickyHeaderList get widget => super.widget as _SliverStickyHeaderList;
+  SliverStickyHeaderList get widget => super.widget as SliverStickyHeaderList;
 
   @override
   _RenderSliverStickyHeaderList get renderObject => super.renderObject as _RenderSliverStickyHeaderList;
@@ -334,14 +357,14 @@ class _SliverStickyHeaderListElement extends RenderObjectElement {
   @override
   void mount(Element? parent, Object? newSlot) {
     super.mount(parent, newSlot);
-    _child = updateChild(_child, widget.child, _SliverStickyHeaderListSlot.list);
+    _child = updateChild(_child, widget._child, _SliverStickyHeaderListSlot.list);
   }
 
   @override
-  void update(_SliverStickyHeaderList newWidget) {
+  void update(SliverStickyHeaderList newWidget) {
     super.update(newWidget);
     assert(widget == newWidget);
-    _child = updateChild(_child, widget.child, _SliverStickyHeaderListSlot.list);
+    _child = updateChild(_child, widget._child, _SliverStickyHeaderListSlot.list);
     renderObject.child!.markHeaderNeedsRebuild();
   }
 
@@ -398,6 +421,8 @@ class _RenderSliverStickyHeaderList extends RenderSliver with RenderSliverHelper
 
   final _SliverStickyHeaderListElement _element;
 
+  SliverStickyHeaderList get _widget => _element.widget;
+
   Widget? _headerWidget;
 
   /// The limiting edge (if any) of the header's item,
@@ -424,10 +449,10 @@ class _RenderSliverStickyHeaderList extends RenderSliver with RenderSliverHelper
     double? endBound;
     if (item != null && !item.allowOverflow) {
       final childParentData = listChild!.parentData! as SliverMultiBoxAdaptorParentData;
-      endBound = switch (_element.widget.headerPlacement) {
-        HeaderPlacement.scrollingStart =>
+      endBound = switch (_widget.headerPlacement._byGrowth(constraints.growthDirection)) {
+        _HeaderGrowthPlacement.growthStart =>
           childParentData.layoutOffset! + listChild.size.onAxis(constraints.axis),
-        HeaderPlacement.scrollingEnd =>
+        _HeaderGrowthPlacement.growthEnd =>
           childParentData.layoutOffset!,
       };
     }
@@ -522,7 +547,7 @@ class _RenderSliverStickyHeaderList extends RenderSliver with RenderSliverHelper
 
   bool _headerAtCoordinateEnd() {
     return axisDirectionIsReversed(constraints.axisDirection)
-      ^ (_element.widget.headerPlacement == HeaderPlacement.scrollingEnd);
+      ^ (_widget.headerPlacement == HeaderPlacement.scrollingEnd);
   }
 
   @override
@@ -559,7 +584,7 @@ class _RenderSliverStickyHeaderList extends RenderSliver with RenderSliverHelper
       } else {
         // The limiting edge of the header's item,
         // in the outer, non-scrolling coordinates.
-        final endBoundAbsolute = axisDirectionIsReversed(constraints.axisDirection)
+        final endBoundAbsolute = axisDirectionIsReversed(constraints.growthAxisDirection)
           ? geometry.layoutExtent - (_headerEndBound! - constraints.scrollOffset)
           : _headerEndBound! - constraints.scrollOffset;
 
@@ -592,11 +617,8 @@ class _RenderSliverStickyHeaderList extends RenderSliver with RenderSliverHelper
     assert(child != null);
     assert(geometry!.hitTestExtent > 0.0);
     if (header != null) {
-      final headerParentData = (header!.parentData as SliverPhysicalParentData);
-      final headerOffset = headerParentData.paintOffset
-        .inDirection(constraints.axisDirection);
       if (hitTestBoxChild(BoxHitTestResult.wrap(result), header!,
-            mainAxisPosition: mainAxisPosition - headerOffset,
+            mainAxisPosition: mainAxisPosition,
             crossAxisPosition: crossAxisPosition)) {
         return true;
       }
@@ -609,8 +631,17 @@ class _RenderSliverStickyHeaderList extends RenderSliver with RenderSliverHelper
   double childMainAxisPosition(RenderObject child) {
     if (child == this.child) return 0.0;
     assert(child == header);
+    // We use Sliver*Physical*ParentData, so the header's position is stored in
+    // physical coordinates.  To meet the spec of `childMainAxisPosition`, we
+    // need to convert to the sliver's coordinate system.
     final headerParentData = (header!.parentData as SliverPhysicalParentData);
-    return headerParentData.paintOffset.inDirection(constraints.axisDirection);
+    final paintOffset = headerParentData.paintOffset;
+    return switch (constraints.growthAxisDirection) {
+      AxisDirection.right => paintOffset.dx,
+      AxisDirection.left  => geometry!.layoutExtent - header!.size.width  - paintOffset.dx,
+      AxisDirection.down  => paintOffset.dy,
+      AxisDirection.up    => geometry!.layoutExtent - header!.size.height - paintOffset.dy,
+    };
   }
 
   @override
@@ -701,16 +732,34 @@ class _RenderSliverStickyHeaderListInner extends RenderSliverList {
 
   @override
   void performLayout() {
-    assert(constraints.growthDirection == GrowthDirection.forward); // TODO dir
-
     super.performLayout();
 
-    final child = switch (widget.headerPlacement) {
-      HeaderPlacement.scrollingStart => _findChildAtStart(),
-      HeaderPlacement.scrollingEnd   => _findChildAtEnd(),
-    };
+    final RenderBox? child;
+    switch (widget.headerPlacement._byGrowth(constraints.growthDirection)) {
+      case _HeaderGrowthPlacement.growthEnd:
+        child = _findChildAtEnd();
+      case _HeaderGrowthPlacement.growthStart:
+        child = _findChildAtStart();
+    }
+
     (parent! as _RenderSliverStickyHeaderList)._rebuildHeader(child);
   }
+}
+
+extension SliverConstraintsGrowthAxisDirection on SliverConstraints {
+  AxisDirection get growthAxisDirection => switch (growthDirection) {
+    GrowthDirection.forward => axisDirection,
+    GrowthDirection.reverse => axisDirection.reversed,
+  };
+}
+
+extension AxisDirectionReversed on AxisDirection {
+  AxisDirection get reversed => switch (this) {
+    AxisDirection.down => AxisDirection.up,
+    AxisDirection.up => AxisDirection.down,
+    AxisDirection.right => AxisDirection.left,
+    AxisDirection.left => AxisDirection.right,
+  };
 }
 
 extension AxisCoordinateDirection on Axis {

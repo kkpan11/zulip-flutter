@@ -4,6 +4,7 @@ import 'package:zulip/api/exception.dart';
 extension ApiRequestExceptionChecks on Subject<ApiRequestException> {
   Subject<String> get routeName => has((e) => e.routeName, 'routeName');
   Subject<String> get message => has((e) => e.message, 'message');
+  Subject<String> get asString => has((u) => u.toString(), 'toString'); // TODO(checks): what's a good convention for this?
 }
 
 extension ZulipApiExceptionChecks on Subject<ZulipApiException> {
@@ -26,5 +27,5 @@ extension Server5xxExceptionChecks on Subject<Server5xxException> {
 }
 
 extension MalformedServerResponseExceptionChecks on Subject<MalformedServerResponseException> {
-  // no properties not on ServerException
+  Subject<Object?> get causeException => has((e) => e.causeException, 'causeException');
 }

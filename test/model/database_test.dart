@@ -1,7 +1,7 @@
 import 'package:checks/checks.dart';
 import 'package:drift/drift.dart';
 import 'package:drift/native.dart';
-import 'package:drift_dev/api/migrations.dart';
+import 'package:drift_dev/api/migrations_native.dart';
 import 'package:test/scaffolding.dart';
 import 'package:zulip/model/database.dart';
 
@@ -37,9 +37,57 @@ void main() {
           .first;
       check(account.toCompanion(false).toJson()).deepEquals({
         ...accountData.toJson(),
-        'id': it(),
+        'id': (Subject<Object?> it) => it.isA<int>(),
         'acked_push_token': null,
       });
+    });
+
+    test('create account with same realm and userId ', () async {
+      final accountData = AccountsCompanion.insert(
+        realmUrl: Uri.parse('https://chat.example/'),
+        userId: 1,
+        email: 'asdf@example.org',
+        apiKey: '1234',
+        zulipVersion: '6.0',
+        zulipMergeBase: const Value('6.0'),
+        zulipFeatureLevel: 42,
+      );
+      final accountDataWithSameUserId = AccountsCompanion.insert(
+        realmUrl: Uri.parse('https://chat.example/'),
+        userId: 1,
+        email: 'otheremail@example.org',
+        apiKey: '12345',
+        zulipVersion: '6.0',
+        zulipMergeBase: const Value('6.0'),
+        zulipFeatureLevel: 42,
+      );
+      await database.createAccount(accountData);
+      await check(database.createAccount(accountDataWithSameUserId))
+        .throws<AccountAlreadyExistsException>();
+    });
+
+    test('create account with same realm and email', () async {
+      final accountData = AccountsCompanion.insert(
+        realmUrl: Uri.parse('https://chat.example/'),
+        userId: 1,
+        email: 'asdf@example.org',
+        apiKey: '1234',
+        zulipVersion: '6.0',
+        zulipMergeBase: const Value('6.0'),
+        zulipFeatureLevel: 42,
+      );
+      final accountDataWithSameEmail = AccountsCompanion.insert(
+        realmUrl: Uri.parse('https://chat.example/'),
+        userId: 2,
+        email: 'asdf@example.org',
+        apiKey: '12345',
+        zulipVersion: '6.0',
+        zulipMergeBase: const Value('6.0'),
+        zulipFeatureLevel: 42,
+      );
+      await database.createAccount(accountData);
+      await check(database.createAccount(accountDataWithSameEmail))
+        .throws<AccountAlreadyExistsException>();
     });
   });
 

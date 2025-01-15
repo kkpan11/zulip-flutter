@@ -1,19 +1,27 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
-import 'package:flutter_gen/gen_l10n/zulip_localizations.dart';
 
+import '../api/model/initial_snapshot.dart';
 import '../api/model/model.dart';
+import '../generated/l10n/zulip_localizations.dart';
 import '../model/content.dart';
 import '../model/narrow.dart';
+import '../model/store.dart';
+import 'app_bar.dart';
 import 'content.dart';
 import 'message_list.dart';
 import 'page.dart';
 import 'store.dart';
+import 'text.dart';
 
 class _TextStyles {
   static const primaryFieldText = TextStyle(fontSize: 20);
-  static const customProfileFieldLabel = TextStyle(fontSize: 15, fontWeight: FontWeight.bold);
+
+  static TextStyle customProfileFieldLabel(BuildContext context) =>
+    const TextStyle(fontSize: 15)
+      .merge(weightVariableTextStyle(context, wght: 700));
+
   static const customProfileFieldText = TextStyle(fontSize: 15);
 }
 
@@ -22,9 +30,37 @@ class ProfilePage extends StatelessWidget {
 
   final int userId;
 
-  static Route<void> buildRoute({required BuildContext context, required int userId}) {
-    return MaterialAccountWidgetRoute(context: context,
+  static Route<void> buildRoute({int? accountId, BuildContext? context,
+      required int userId}) {
+    return MaterialAccountWidgetRoute(accountId: accountId, context: context,
       page: ProfilePage(userId: userId));
+  }
+
+  /// The given user's real email address, if known, for displaying in the UI.
+  ///
+  /// Returns null if self-user isn't able to see [user]'s real email address.
+  String? _getDisplayEmailFor(User user, {required PerAccountStore store}) {
+    if (store.account.zulipFeatureLevel >= 163) { // TODO(server-7)
+      // A non-null value means self-user has access to [user]'s real email,
+      // while a null value means it doesn't have access to the email.
+      // Search for "delivery_email" in https://zulip.com/api/register-queue.
+      return user.deliveryEmail;
+    } else {
+      if (user.deliveryEmail != null) {
+        // A non-null value means self-user has access to [user]'s real email,
+        // while a null value doesn't necessarily mean it doesn't have access
+        // to the email, ....
+        return user.deliveryEmail;
+      } else if (store.emailAddressVisibility == EmailAddressVisibility.everyone) {
+        // ... we have to also check for [PerAccountStore.emailAddressVisibility].
+        // See:
+        //   * https://github.com/zulip/zulip-mobile/pull/5515#discussion_r997731727
+        //   * https://chat.zulip.org/#narrow/stream/378-api-design/topic/email.20address.20visibility/near/1296133
+        return user.email;
+      } else {
+        return null;
+      }
+    }
   }
 
   @override
@@ -36,14 +72,19 @@ class ProfilePage extends StatelessWidget {
       return const _ProfileErrorPage();
     }
 
+    final displayEmail = _getDisplayEmailFor(user, store: store);
     final items = [
       Center(
         child: Avatar(userId: userId, size: 200, borderRadius: 200 / 8)),
       const SizedBox(height: 16),
       Text(user.fullName,
         textAlign: TextAlign.center,
-        style: _TextStyles.primaryFieldText.merge(const TextStyle(fontWeight: FontWeight.bold))),
-      // TODO(#291) render email field
+        style: _TextStyles.primaryFieldText
+          .merge(weightVariableTextStyle(context, wght: 700))),
+      if (displayEmail != null)
+        Text(displayEmail,
+          textAlign: TextAlign.center,
+          style: _TextStyles.primaryFieldText),
       Text(roleToLabel(user.role, zulipLocalizations),
         textAlign: TextAlign.center,
         style: _TextStyles.primaryFieldText),
@@ -56,13 +97,13 @@ class ProfilePage extends StatelessWidget {
       FilledButton.icon(
         onPressed: () => Navigator.push(context,
           MessageListPage.buildRoute(context: context,
-            narrow: DmNarrow.withUser(userId, selfUserId: store.account.userId))),
+            narrow: DmNarrow.withUser(userId, selfUserId: store.selfUserId))),
         icon: const Icon(Icons.email),
         label: Text(zulipLocalizations.profileButtonSendDirectMessage)),
     ];
 
     return Scaffold(
-      appBar: AppBar(title: Text(user.fullName)),
+      appBar: ZulipAppBar(title: Text(user.fullName)),
       body: SingleChildScrollView(
         child: Center(
           child: ConstrainedBox(
@@ -81,7 +122,7 @@ class _ProfileErrorPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Error')),
+      appBar: ZulipAppBar(title: const Text('Error')),
       body: const SingleChildScrollView(
         child: Padding(
           padding: EdgeInsets.symmetric(horizontal: 16, vertical: 32),
@@ -113,7 +154,7 @@ class _ProfileDataTable extends StatelessWidget {
 
   static T? _tryDecode<T, U>(T Function(U) fromJson, String data) {
     try {
-      return fromJson(jsonDecode(data));
+      return fromJson(jsonDecode(data) as U);
     } on FormatException {
       return null;
     } on TypeError {
@@ -188,10 +229,11 @@ class _ProfileDataTable extends StatelessWidget {
 
       items.add(Row(
         crossAxisAlignment: CrossAxisAlignment.baseline,
-        textBaseline: TextBaseline.alphabetic,
+        textBaseline: localizedTextBaseline(context),
         children: [
-          SizedBox(width: 96,
-            child: Text(realmField.name, style: _TextStyles.customProfileFieldLabel)),
+          SizedBox(width: 100,
+            child: Text(style: _TextStyles.customProfileFieldLabel(context),
+              realmField.name)),
           const SizedBox(width: 8),
           Flexible(child: widget),
         ]));
@@ -216,7 +258,9 @@ class _LinkWidget extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final linkNode = LinkNode(url: url, nodes: [TextNode(text)]);
-    final paragraph = Paragraph(node: ParagraphNode(nodes: [linkNode], links: [linkNode]));
+    final paragraph = DefaultTextStyle(
+      style: ContentTheme.of(context).textStylePlainParagraph,
+      child: Paragraph(node: ParagraphNode(nodes: [linkNode], links: [linkNode])));
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 8),
       child: MouseRegion(

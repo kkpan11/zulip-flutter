@@ -1,23 +1,277 @@
+import 'dart:async';
+
+import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:html/dom.dart' as dom;
+import 'package:intl/intl.dart';
 
 import '../api/core.dart';
 import '../api/model/model.dart';
+import '../generated/l10n/zulip_localizations.dart';
+import '../model/avatar_url.dart';
 import '../model/binding.dart';
 import '../model/content.dart';
 import '../model/internal_link.dart';
-import '../model/store.dart';
 import 'code_block.dart';
 import 'dialog.dart';
+import 'icons.dart';
 import 'lightbox.dart';
 import 'message_list.dart';
+import 'poll.dart';
 import 'store.dart';
 import 'text.dart';
 
+/// A central place for styles for Zulip content (rendered Zulip Markdown).
+///
+/// These styles will animate on theme changes (with help from [lerp]),
+/// so styles that differ between light and dark theme belong here.
+///
+/// Styles also belong here if we want to centralize computing them,
+/// for performance. (The message list is particularly performance-sensitive.)
+///
+/// Content elements are assumed to be painted on a theme-appropriate
+/// background. For what this is in the message list, see
+/// widgets/message_list.dart.
+class ContentTheme extends ThemeExtension<ContentTheme> {
+  factory ContentTheme.light(BuildContext context) {
+    return ContentTheme._(
+      colorCodeBlockBackground: const HSLColor.fromAHSL(0.04, 0, 0, 0).toColor(),
+      colorDirectMentionBackground: const HSLColor.fromAHSL(0.2, 240, 0.7, 0.7).toColor(),
+      colorGlobalTimeBackground: const HSLColor.fromAHSL(1, 0, 0, 0.93).toColor(),
+      colorGlobalTimeBorder: const HSLColor.fromAHSL(1, 0, 0, 0.8).toColor(),
+      colorMathBlockBorder: const HSLColor.fromAHSL(0.15, 240, 0.8, 0.5).toColor(),
+      colorMessageMediaContainerBackground: const Color.fromRGBO(0, 0, 0, 0.03),
+      colorPollNames: const HSLColor.fromAHSL(1, 0, 0, .45).toColor(),
+      colorPollVoteCountBackground: const HSLColor.fromAHSL(1, 0, 0, 1).toColor(),
+      colorPollVoteCountBorder: const HSLColor.fromAHSL(1, 156, 0.28, 0.7).toColor(),
+      colorPollVoteCountText: const HSLColor.fromAHSL(1, 156, 0.41, 0.4).toColor(),
+      colorTableCellBorder: const HSLColor.fromAHSL(1, 0, 0, 0.80).toColor(),
+      colorTableHeaderBackground: const HSLColor.fromAHSL(1, 0, 0, 0.93).toColor(),
+      colorThematicBreak: const HSLColor.fromAHSL(1, 0, 0, .87).toColor(),
+      textStylePlainParagraph: _plainParagraphCommon(context).copyWith(
+        color: const HSLColor.fromAHSL(1, 0, 0, 0.15).toColor(),
+        debugLabel: 'ContentTheme.textStylePlainParagraph'),
+      textStyleEmoji: TextStyle(
+        fontFamily: emojiFontFamily, fontFamilyFallback: const []),
+      codeBlockTextStyles: CodeBlockTextStyles.light(context),
+      textStyleError: const TextStyle(fontSize: kBaseFontSize, color: Colors.red)
+        .merge(weightVariableTextStyle(context, wght: 700)),
+      textStyleErrorCode: kMonospaceTextStyle
+        .merge(const TextStyle(fontSize: kBaseFontSize, color: Colors.red)),
+      textStyleInlineCode: kMonospaceTextStyle.merge(TextStyle(
+        backgroundColor: const HSLColor.fromAHSL(0.06, 0, 0, 0).toColor())),
+      textStyleInlineMath: kMonospaceTextStyle.merge(TextStyle(
+        // TODO(#46) this won't be needed
+        backgroundColor: const HSLColor.fromAHSL(1, 240, 0.4, 0.93).toColor())),
+    );
+  }
+
+  factory ContentTheme.dark(BuildContext context) {
+    return ContentTheme._(
+      colorCodeBlockBackground: const HSLColor.fromAHSL(0.04, 0, 0, 1).toColor(),
+      colorDirectMentionBackground: const HSLColor.fromAHSL(0.25, 240, 0.52, 0.6).toColor(),
+      colorGlobalTimeBackground: const HSLColor.fromAHSL(0.2, 0, 0, 0).toColor(),
+      colorGlobalTimeBorder: const HSLColor.fromAHSL(0.4, 0, 0, 0).toColor(),
+      colorMathBlockBorder: const HSLColor.fromAHSL(1, 240, 0.4, 0.4).toColor(),
+      colorMessageMediaContainerBackground: const HSLColor.fromAHSL(0.03, 0, 0, 1).toColor(),
+      colorPollNames: const HSLColor.fromAHSL(1, 236, .15, .7).toColor(),
+      colorPollVoteCountBackground: const HSLColor.fromAHSL(0.2, 0, 0, 0).toColor(),
+      colorPollVoteCountBorder: const HSLColor.fromAHSL(1, 185, 0.35, 0.35).toColor(),
+      colorPollVoteCountText: const HSLColor.fromAHSL(1, 185, 0.35, 0.65).toColor(),
+      colorTableCellBorder: const HSLColor.fromAHSL(1, 0, 0, 0.33).toColor(),
+      colorTableHeaderBackground: const HSLColor.fromAHSL(0.5, 0, 0, 0).toColor(),
+      colorThematicBreak: const HSLColor.fromAHSL(1, 0, 0, .87).toColor().withValues(alpha: 0.2),
+      textStylePlainParagraph: _plainParagraphCommon(context).copyWith(
+        color: const HSLColor.fromAHSL(1, 0, 0, 0.85).toColor(),
+        debugLabel: 'ContentTheme.textStylePlainParagraph'),
+      textStyleEmoji: TextStyle(
+        fontFamily: emojiFontFamily, fontFamilyFallback: const []),
+      codeBlockTextStyles: CodeBlockTextStyles.dark(context),
+      textStyleError: const TextStyle(fontSize: kBaseFontSize, color: Colors.red)
+        .merge(weightVariableTextStyle(context, wght: 700)),
+      textStyleErrorCode: kMonospaceTextStyle
+        .merge(const TextStyle(fontSize: kBaseFontSize, color: Colors.red)),
+      textStyleInlineCode: kMonospaceTextStyle.merge(TextStyle(
+        backgroundColor: const HSLColor.fromAHSL(0.08, 0, 0, 1).toColor())),
+      textStyleInlineMath: kMonospaceTextStyle.merge(TextStyle(
+        // TODO(#46) this won't be needed
+        backgroundColor: const HSLColor.fromAHSL(1, 240, 0.4, 0.4).toColor())),
+    );
+  }
+
+  ContentTheme._({
+    required this.colorCodeBlockBackground,
+    required this.colorDirectMentionBackground,
+    required this.colorGlobalTimeBackground,
+    required this.colorGlobalTimeBorder,
+    required this.colorMathBlockBorder,
+    required this.colorMessageMediaContainerBackground,
+    required this.colorPollNames,
+    required this.colorPollVoteCountBackground,
+    required this.colorPollVoteCountBorder,
+    required this.colorPollVoteCountText,
+    required this.colorTableCellBorder,
+    required this.colorTableHeaderBackground,
+    required this.colorThematicBreak,
+    required this.textStylePlainParagraph,
+    required this.textStyleEmoji,
+    required this.codeBlockTextStyles,
+    required this.textStyleError,
+    required this.textStyleErrorCode,
+    required this.textStyleInlineCode,
+    required this.textStyleInlineMath,
+  });
+
+  /// The [ContentTheme] from the context's active theme.
+  ///
+  /// The [ThemeData] must include [ContentTheme] in [ThemeData.extensions].
+  static ContentTheme of(BuildContext context) {
+    final theme = Theme.of(context);
+    final extension = theme.extension<ContentTheme>();
+    assert(extension != null);
+    return extension!;
+  }
+
+  final Color colorCodeBlockBackground;
+  final Color colorDirectMentionBackground;
+  final Color colorGlobalTimeBackground;
+  final Color colorGlobalTimeBorder;
+  final Color colorMathBlockBorder; // TODO(#46) this won't be needed
+  final Color colorMessageMediaContainerBackground;
+  final Color colorPollNames;
+  final Color colorPollVoteCountBackground;
+  final Color colorPollVoteCountBorder;
+  final Color colorPollVoteCountText;
+  final Color colorTableCellBorder;
+  final Color colorTableHeaderBackground;
+  final Color colorThematicBreak;
+
+  /// The complete [TextStyle] we use for plain, unstyled paragraphs.
+  ///
+  /// Also the base style that all other text content should inherit from.
+  ///
+  /// This is the complete style for plain paragraphs. Plain-paragraph content
+  /// should not need styles from other sources, such as Material defaults.
+  final TextStyle textStylePlainParagraph;
+
+  /// The [TextStyle] to use for Unicode emoji.
+  final TextStyle textStyleEmoji;
+
+  final CodeBlockTextStyles codeBlockTextStyles;
+  final TextStyle textStyleError;
+  final TextStyle textStyleErrorCode;
+
+  /// The [TextStyle] for inline code, excluding font-size adjustment.
+  ///
+  /// Inline code should use this and also apply [kInlineCodeFontSizeFactor]
+  /// to the font size of the surrounding text
+  /// (which might be a Paragraph, a Heading, etc.).
+  final TextStyle textStyleInlineCode;
+
+  /// The [TextStyle] for inline math, excluding font-size adjustment.
+  ///
+  /// Inline math should use this and also apply [kInlineCodeFontSizeFactor]
+  /// to the font size of the surrounding text
+  /// (which might be a Paragraph, a Heading, etc.).
+  final TextStyle textStyleInlineMath;
+
+  /// [ContentTheme.textStylePlainParagraph] attributes independent of theme.
+  static TextStyle _plainParagraphCommon(BuildContext context) => TextStyle(
+    inherit: false,
+
+    fontSize: kBaseFontSize,
+    letterSpacing: 0,
+    textBaseline: localizedTextBaseline(context),
+    height: (22 / kBaseFontSize),
+    leadingDistribution: TextLeadingDistribution.even,
+    decoration: TextDecoration.none,
+    fontFamily: kDefaultFontFamily,
+    fontFamilyFallback: defaultFontFamilyFallback,
+  )
+    .merge(weightVariableTextStyle(context));
+
+  @override
+  ContentTheme copyWith({
+    Color? colorCodeBlockBackground,
+    Color? colorDirectMentionBackground,
+    Color? colorGlobalTimeBackground,
+    Color? colorGlobalTimeBorder,
+    Color? colorMathBlockBorder,
+    Color? colorMessageMediaContainerBackground,
+    Color? colorPollNames,
+    Color? colorPollVoteCountBackground,
+    Color? colorPollVoteCountBorder,
+    Color? colorPollVoteCountText,
+    Color? colorTableCellBorder,
+    Color? colorTableHeaderBackground,
+    Color? colorThematicBreak,
+    TextStyle? textStylePlainParagraph,
+    TextStyle? textStyleEmoji,
+    CodeBlockTextStyles? codeBlockTextStyles,
+    TextStyle? textStyleError,
+    TextStyle? textStyleErrorCode,
+    TextStyle? textStyleInlineCode,
+    TextStyle? textStyleInlineMath,
+  }) {
+    return ContentTheme._(
+      colorCodeBlockBackground: colorCodeBlockBackground ?? this.colorCodeBlockBackground,
+      colorDirectMentionBackground: colorDirectMentionBackground ?? this.colorDirectMentionBackground,
+      colorGlobalTimeBackground: colorGlobalTimeBackground ?? this.colorGlobalTimeBackground,
+      colorGlobalTimeBorder: colorGlobalTimeBorder ?? this.colorGlobalTimeBorder,
+      colorMathBlockBorder: colorMathBlockBorder ?? this.colorMathBlockBorder,
+      colorMessageMediaContainerBackground: colorMessageMediaContainerBackground ?? this.colorMessageMediaContainerBackground,
+      colorPollNames: colorPollNames ?? this.colorPollNames,
+      colorPollVoteCountBackground: colorPollVoteCountBackground ?? this.colorPollVoteCountBackground,
+      colorPollVoteCountBorder: colorPollVoteCountBorder ?? this.colorPollVoteCountBorder,
+      colorPollVoteCountText: colorPollVoteCountText ?? this.colorPollVoteCountText,
+      colorTableCellBorder: colorTableCellBorder ?? this.colorTableCellBorder,
+      colorTableHeaderBackground: colorTableHeaderBackground ?? this.colorTableHeaderBackground,
+      colorThematicBreak: colorThematicBreak ?? this.colorThematicBreak,
+      textStylePlainParagraph: textStylePlainParagraph ?? this.textStylePlainParagraph,
+      textStyleEmoji: textStyleEmoji ?? this.textStyleEmoji,
+      codeBlockTextStyles: codeBlockTextStyles ?? this.codeBlockTextStyles,
+      textStyleError: textStyleError ?? this.textStyleError,
+      textStyleErrorCode: textStyleErrorCode ?? this.textStyleErrorCode,
+      textStyleInlineCode: textStyleInlineCode ?? this.textStyleInlineCode,
+      textStyleInlineMath: textStyleInlineMath ?? this.textStyleInlineMath,
+    );
+  }
+
+  @override
+  ContentTheme lerp(ContentTheme other, double t) {
+    if (identical(this, other)) {
+      return this;
+    }
+    return ContentTheme._(
+      colorCodeBlockBackground: Color.lerp(colorCodeBlockBackground, other.colorCodeBlockBackground, t)!,
+      colorDirectMentionBackground: Color.lerp(colorDirectMentionBackground, other.colorDirectMentionBackground, t)!,
+      colorGlobalTimeBackground: Color.lerp(colorGlobalTimeBackground, other.colorGlobalTimeBackground, t)!,
+      colorGlobalTimeBorder: Color.lerp(colorGlobalTimeBorder, other.colorGlobalTimeBorder, t)!,
+      colorMathBlockBorder: Color.lerp(colorMathBlockBorder, other.colorMathBlockBorder, t)!,
+      colorMessageMediaContainerBackground: Color.lerp(colorMessageMediaContainerBackground, other.colorMessageMediaContainerBackground, t)!,
+      colorPollNames: Color.lerp(colorPollNames, other.colorPollNames, t)!,
+      colorPollVoteCountBackground: Color.lerp(colorPollVoteCountBackground, other.colorPollVoteCountBackground, t)!,
+      colorPollVoteCountBorder: Color.lerp(colorPollVoteCountBorder, other.colorPollVoteCountBorder, t)!,
+      colorPollVoteCountText: Color.lerp(colorPollVoteCountText, other.colorPollVoteCountText, t)!,
+      colorTableCellBorder: Color.lerp(colorTableCellBorder, other.colorTableCellBorder, t)!,
+      colorTableHeaderBackground: Color.lerp(colorTableHeaderBackground, other.colorTableHeaderBackground, t)!,
+      colorThematicBreak: Color.lerp(colorThematicBreak, other.colorThematicBreak, t)!,
+      textStylePlainParagraph: TextStyle.lerp(textStylePlainParagraph, other.textStylePlainParagraph, t)!,
+      textStyleEmoji: TextStyle.lerp(textStyleEmoji, other.textStyleEmoji, t)!,
+      codeBlockTextStyles: CodeBlockTextStyles.lerp(codeBlockTextStyles, other.codeBlockTextStyles, t),
+      textStyleError: TextStyle.lerp(textStyleError, other.textStyleError, t)!,
+      textStyleErrorCode: TextStyle.lerp(textStyleErrorCode, other.textStyleErrorCode, t)!,
+      textStyleInlineCode: TextStyle.lerp(textStyleInlineCode, other.textStyleInlineCode, t)!,
+      textStyleInlineMath: TextStyle.lerp(textStyleInlineMath, other.textStyleInlineMath, t)!,
+    );
+  }
+}
+
 /// The font size for message content in a plain unstyled paragraph.
-const double kBaseFontSize = 14;
+const double kBaseFontSize = 17;
 
 /// The entire content of a message, aka its body.
 ///
@@ -27,12 +281,18 @@ class MessageContent extends StatelessWidget {
   const MessageContent({super.key, required this.message, required this.content});
 
   final Message message;
-  final ZulipContent content;
+  final ZulipMessageContent content;
 
   @override
   Widget build(BuildContext context) {
+    final content = this.content;
     return InheritedMessage(message: message,
-      child: BlockContentList(nodes: content.nodes));
+      child: DefaultTextStyle(
+        style: ContentTheme.of(context).textStylePlainParagraph,
+        child: switch (content) {
+          ZulipContent() => BlockContentList(nodes: content.nodes),
+          PollContent()  => PollWidget(messageId: message.id, poll: content.poll),
+        }));
   }
 }
 
@@ -66,30 +326,66 @@ class BlockContentList extends StatelessWidget {
   Widget build(BuildContext context) {
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       ...nodes.map((node) {
-        if (node is LineBreakNode) {
-          // This goes in a Column.  So to get the effect of a newline,
-          // just use an empty Text.
-          return const Text('');
-        } else if (node is ParagraphNode) {
-          return Paragraph(node: node);
-        } else if (node is HeadingNode) {
-          return Heading(node: node);
-        } else if (node is QuotationNode) {
-          return Quotation(node: node);
-        } else if (node is ListNode) {
-          return ListNodeWidget(node: node);
-        } else if (node is CodeBlockNode) {
-          return CodeBlock(node: node);
-        } else if (node is ImageNode) {
-          return MessageImage(node: node);
-        } else if (node is UnimplementedBlockContentNode) {
-          return Text.rich(_errorUnimplemented(node));
-        } else {
-          // TODO(dart-3): Use a sealed class / pattern-matching to exclude this.
-          throw Exception("impossible BlockContentNode: ${node.debugHtmlText}");
-        }
+        return switch (node) {
+          LineBreakNode() =>
+            // This goes in a Column.  So to get the effect of a newline,
+            // just use an empty Text.
+            const Text(''),
+          ThematicBreakNode() => const ThematicBreak(),
+          ParagraphNode() => Paragraph(node: node),
+          HeadingNode() => Heading(node: node),
+          QuotationNode() => Quotation(node: node),
+          ListNode() => ListNodeWidget(node: node),
+          SpoilerNode() => Spoiler(node: node),
+          CodeBlockNode() => CodeBlock(node: node),
+          MathBlockNode() => MathBlock(node: node),
+          ImageNodeList() => MessageImageList(node: node),
+          ImageNode() => (){
+            assert(false,
+              "[ImageNode] not allowed in [BlockContentList]. "
+              "It should be wrapped in [ImageNodeList]."
+            );
+            return MessageImage(node: node);
+          }(),
+          InlineVideoNode() => MessageInlineVideo(node: node),
+          EmbedVideoNode() => MessageEmbedVideo(node: node),
+          TableNode() => MessageTable(node: node),
+          TableRowNode() => () {
+            assert(false,
+              "[TableRowNode] not allowed in [BlockContentList]. "
+              "It should be wrapped in [TableNode]."
+            );
+            return const SizedBox.shrink();
+          }(),
+          TableCellNode() => () {
+            assert(false,
+              "[TableCellNode] not allowed in [BlockContentList]. "
+              "It should be wrapped in [TableRowNode]."
+            );
+            return const SizedBox.shrink();
+          }(),
+          UnimplementedBlockContentNode() =>
+            Text.rich(_errorUnimplemented(node, context: context)),
+        };
+
       }),
     ]);
+  }
+}
+
+class ThematicBreak extends StatelessWidget {
+  const ThematicBreak({super.key});
+
+  static const htmlHeight = 2.0;
+  static const htmlMarginY = 20.0;
+
+  @override
+  Widget build(BuildContext context) {
+    return Divider(
+      color: ContentTheme.of(context).colorThematicBreak,
+      thickness: htmlHeight,
+      height: 2 * htmlMarginY + htmlHeight,
+    );
   }
 }
 
@@ -104,7 +400,10 @@ class Paragraph extends StatelessWidget {
     // The paragraph has vertical CSS margins, but those have no effect.
     if (node.nodes.isEmpty) return const SizedBox();
 
-    final text = _buildBlockInlineContainer(node: node, style: null);
+    final text = _buildBlockInlineContainer(
+      node: node,
+      style: DefaultTextStyle.of(context).style,
+    );
 
     // If the paragraph didn't actually have a `p` element in the HTML,
     // then apply no margins.  (For example, these are seen in list items.)
@@ -125,12 +424,28 @@ class Heading extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // TODO(#192) h1, h2, h3, h4, h5 -- same as h6 except font size
-    assert(node.level == HeadingLevel.h6);
+    // Em-heights taken from zulip:web/styles/rendered_markdown.css .
+    final emHeight = switch(node.level) {
+      HeadingLevel.h1 => 1.4,
+      HeadingLevel.h2 => 1.3,
+      HeadingLevel.h3 => 1.2,
+      HeadingLevel.h4 => 1.1,
+      HeadingLevel.h5 => 1.05,
+      HeadingLevel.h6 => 1.0,
+    };
     return Padding(
       padding: const EdgeInsets.only(top: 15, bottom: 5),
       child: _buildBlockInlineContainer(
-        style: const TextStyle(fontWeight: FontWeight.w600, height: 1.4),
+        style: TextStyle(
+          fontSize: kBaseFontSize * emHeight,
+          height: 1.4,
+        )
+          // Could set boldness relative to ambient text style, which itself
+          // might be bolder than normal (e.g. in spoiler headers).
+          // But this didn't seem like a clear improvement and would make inline
+          // **bold** spans less distinct; discussion:
+          //   https://github.com/zulip/zulip-flutter/pull/706#issuecomment-2141326257
+          .merge(weightVariableTextStyle(context, wght: 600)),
         node: node));
   }
 }
@@ -150,6 +465,7 @@ class Quotation extends StatelessWidget {
           border: Border(
             left: BorderSide(
               width: 5,
+              // Web has the same color in light and dark mode.
               color: const HSLColor.fromAHSL(1, 0, 0, 0.87).toColor()))),
         child: BlockContentList(nodes: node.nodes)));
   }
@@ -197,7 +513,7 @@ class ListItemWidget extends StatelessWidget {
     return Row(
       mainAxisAlignment: MainAxisAlignment.start,
       crossAxisAlignment: CrossAxisAlignment.baseline,
-      textBaseline: TextBaseline.alphabetic,
+      textBaseline: localizedTextBaseline(context),
       children: [
         SizedBox(
           width: 20, // TODO handle long numbers in <ol>, like https://github.com/zulip/zulip/pull/25063
@@ -205,6 +521,108 @@ class ListItemWidget extends StatelessWidget {
             alignment: AlignmentDirectional.topEnd, child: Text(marker))),
         Expanded(child: BlockContentList(nodes: nodes)),
       ]);
+  }
+}
+
+class Spoiler extends StatefulWidget {
+  const Spoiler({super.key, required this.node});
+
+  final SpoilerNode node;
+
+  @override
+  State<Spoiler> createState() => _SpoilerState();
+}
+
+class _SpoilerState extends State<Spoiler> with TickerProviderStateMixin {
+  bool expanded = false;
+
+  late final AnimationController _controller = AnimationController(
+    duration: const Duration(milliseconds: 400), vsync: this);
+  late final Animation<double> _animation = CurvedAnimation(
+    parent: _controller, curve: Curves.easeInOut);
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _handleTap() {
+    setState(() {
+      if (!expanded) {
+        _controller.forward();
+        expanded = true;
+      } else {
+        _controller.reverse();
+        expanded = false;
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final zulipLocalizations = ZulipLocalizations.of(context);
+    final header = widget.node.header;
+    final effectiveHeader = header.isNotEmpty
+      ? header
+      : [ParagraphNode(links: null,
+           nodes: [TextNode(zulipLocalizations.spoilerDefaultHeaderText)])];
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(0, 5, 0, 15),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          // Web has the same color in light and dark mode.
+          border: Border.all(color: const Color(0xff808080)),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Padding(padding: const EdgeInsetsDirectional.fromSTEB(10, 2, 8, 2),
+          child: Column(
+            children: [
+              GestureDetector(
+                behavior: HitTestBehavior.translucent,
+                onTap: _handleTap,
+                child: Padding(
+                  padding: const EdgeInsets.all(5),
+                  child: Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                    Expanded(
+                      child: DefaultTextStyle.merge(
+                        style: weightVariableTextStyle(context, wght: 700),
+                        child: BlockContentList(
+                          nodes: effectiveHeader))),
+                    RotationTransition(
+                      turns: _animation.drive(Tween(begin: 0, end: 0.5)),
+                      // Web has the same color in light and dark mode.
+                      child: const Icon(color: Color(0xffd4d4d4), size: 25,
+                        Icons.expand_more)),
+                  ]))),
+              FadeTransition(
+                opacity: _animation,
+                child: const SizedBox(height: 0, width: double.infinity,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      border: Border(
+                        // Web has the same color in light and dark mode.
+                        bottom: BorderSide(width: 1, color: Color(0xff808080))))))),
+              SizeTransition(
+                sizeFactor: _animation,
+                axis: Axis.vertical,
+                axisAlignment: -1,
+                child: Padding(
+                  padding: const EdgeInsets.all(5),
+                  child: BlockContentList(nodes: widget.node.content))),
+            ]))));
+  }
+}
+
+class MessageImageList extends StatelessWidget {
+  const MessageImageList({super.key, required this.node});
+
+  final ImageNodeList node;
+
+  @override
+  Widget build(BuildContext context) {
+    return Wrap(
+      children: node.images.map((imageNode) => MessageImage(node: imageNode)).toList());
   }
 }
 
@@ -217,37 +635,124 @@ class MessageImage extends StatelessWidget {
   Widget build(BuildContext context) {
     final message = InheritedMessage.of(context);
 
-    // TODO(#193) multiple images in a row
     // TODO image hover animation
-    final src = node.srcUrl;
-
+    final srcUrl = node.srcUrl;
+    final thumbnailUrl = node.thumbnailUrl;
     final store = PerAccountStoreWidget.of(context);
-    final resolvedSrc = resolveUrl(src, store.account);
+    final resolvedSrcUrl = store.tryResolveUrl(srcUrl);
+    final resolvedThumbnailUrl = thumbnailUrl == null
+      ? null : store.tryResolveUrl(thumbnailUrl);
 
-    return GestureDetector(
-      onTap: () {
-        Navigator.of(context).push(getLightboxRoute(
-          context: context, message: message, src: resolvedSrc));
+    // TODO if src fails to parse, show an explicit "broken image"
+
+    return MessageMediaContainer(
+      onTap: resolvedSrcUrl == null ? null : () { // TODO(log)
+        Navigator.of(context).push(getImageLightboxRoute(
+          context: context,
+          message: message,
+          src: resolvedSrcUrl,
+          thumbnailUrl: resolvedThumbnailUrl,
+          originalWidth: node.originalWidth,
+          originalHeight: node.originalHeight));
       },
-      child: Align(
+      child: node.loading
+        ? const CupertinoActivityIndicator()
+        : resolvedSrcUrl == null ? null : LightboxHero(
+            message: message,
+            src: resolvedSrcUrl,
+            child: RealmContentNetworkImage(
+              resolvedThumbnailUrl ?? resolvedSrcUrl,
+              filterQuality: FilterQuality.medium)));
+  }
+}
+
+class MessageInlineVideo extends StatelessWidget {
+  const MessageInlineVideo({super.key, required this.node});
+
+  final InlineVideoNode node;
+
+  @override
+  Widget build(BuildContext context) {
+    final message = InheritedMessage.of(context);
+    final store = PerAccountStoreWidget.of(context);
+    final resolvedSrc = store.tryResolveUrl(node.srcUrl);
+
+    return MessageMediaContainer(
+      onTap: resolvedSrc == null ? null : () { // TODO(log)
+        Navigator.of(context).push(getVideoLightboxRoute(
+          context: context,
+          message: message,
+          src: resolvedSrc));
+      },
+      child: Container(
+        color: Colors.black, // Web has the same color in light and dark mode.
+        alignment: Alignment.center,
+        // To avoid potentially confusing UX, do not show play icon as
+        // we also disable onTap above.
+        child: resolvedSrc == null ? null : const Icon( // TODO(log)
+          Icons.play_arrow_rounded,
+          color: Colors.white, // Web has the same color in light and dark mode.
+          size: 32)));
+  }
+}
+
+class MessageEmbedVideo extends StatelessWidget {
+  const MessageEmbedVideo({super.key, required this.node});
+
+  final EmbedVideoNode node;
+
+  @override
+  Widget build(BuildContext context) {
+    final store = PerAccountStoreWidget.of(context);
+    final previewImageSrcUrl = store.tryResolveUrl(node.previewImageSrcUrl);
+
+    return MessageMediaContainer(
+      onTap: () => _launchUrl(context, node.hrefUrl),
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          if (previewImageSrcUrl != null) // TODO(log)
+            RealmContentNetworkImage(
+              previewImageSrcUrl,
+              filterQuality: FilterQuality.medium),
+          // Show the "play" icon even when previewImageSrcUrl didn't resolve;
+          // the action uses hrefUrl, which might still work.
+          const Icon(
+            Icons.play_arrow_rounded,
+            color: Colors.white, // Web has the same color in light and dark mode.
+            size: 32),
+        ]));
+  }
+}
+
+class MessageMediaContainer extends StatelessWidget {
+  const MessageMediaContainer({
+    super.key,
+    required this.onTap,
+    required this.child,
+  });
+
+  final void Function()? onTap;
+  final Widget? child;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: UnconstrainedBox(
         alignment: Alignment.centerLeft,
         child: Padding(
           // TODO clean up this padding by imitating web less precisely;
           //   in particular, avoid adding loose whitespace at end of message.
-          // The corresponding element on web has a 5px two-sided margin…
-          // and then a 1px transparent border all around.
-          padding: const EdgeInsets.fromLTRB(1, 1, 6, 6),
-          child: Container(
-            height: 100,
-            width: 150,
-            alignment: Alignment.center,
-            color: const Color.fromRGBO(0, 0, 0, 0.03),
-            child: LightboxHero(
-              message: message,
-              src: resolvedSrc,
-              child: RealmContentNetworkImage(
-                resolvedSrc,
-                filterQuality: FilterQuality.medium))))));
+          padding: const EdgeInsets.only(right: 5, bottom: 5),
+          child: ColoredBox(
+            color: ContentTheme.of(context).colorMessageMediaContainerBackground,
+            child: Padding(
+              padding: const EdgeInsets.all(1),
+              child: SizedBox(
+                height: 100,
+                width: 150,
+                child: child))))));
   }
 }
 
@@ -258,28 +763,37 @@ class CodeBlock extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final styles = ContentTheme.of(context).codeBlockTextStyles;
+    return _CodeBlockContainer(
+      borderColor: Colors.transparent,
+      child: Text.rich(TextSpan(
+        style: styles.plain,
+        children: node.spans
+          .map((node) => TextSpan(style: styles.forSpan(node.type), text: node.text))
+          .toList(growable: false))));
+  }
+}
+
+class _CodeBlockContainer extends StatelessWidget {
+  const _CodeBlockContainer({required this.borderColor, required this.child});
+
+  final Color borderColor;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
     return Container(
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: ContentTheme.of(context).colorCodeBlockBackground,
         border: Border.all(
           width: 1,
-          color: const HSLColor.fromAHSL(0.15, 0, 0, 0).toColor()),
+          color: borderColor),
         borderRadius: BorderRadius.circular(4)),
       child: SingleChildScrollViewWithScrollbar(
         scrollDirection: Axis.horizontal,
         child: Padding(
           padding: const EdgeInsets.fromLTRB(7, 5, 7, 3),
-          child: Text.rich(_buildNodes(node.spans)))));
-  }
-
-  InlineSpan _buildNodes(List<CodeBlockSpanNode> nodes) {
-    return TextSpan(
-      style: _kCodeBlockStyle,
-      children: nodes.map(_buildNode).toList(growable: false));
-  }
-
-  InlineSpan _buildNode(CodeBlockSpanNode node) {
-    return TextSpan(text: node.text, style: codeBlockTextStyle(node.type));
+          child: child)));
   }
 }
 
@@ -310,29 +824,50 @@ class _SingleChildScrollViewWithScrollbarState
   }
 }
 
+class MathBlock extends StatelessWidget {
+  const MathBlock({super.key, required this.node});
+
+  final MathBlockNode node;
+
+  @override
+  Widget build(BuildContext context) {
+    return _CodeBlockContainer(
+      borderColor: ContentTheme.of(context).colorMathBlockBorder,
+      child: Text.rich(TextSpan(
+        style: ContentTheme.of(context).codeBlockTextStyles.plain,
+        children: [TextSpan(text: node.texSource)])));
+  }
+}
+
 //
 // Inline layout.
 //
 
 Widget _buildBlockInlineContainer({
-  required TextStyle? style,
+  required TextStyle style,
   required BlockInlineContainerNode node,
+  TextAlign? textAlign,
 }) {
   if (node.links == null) {
     return InlineContent(recognizer: null, linkRecognizers: null,
-      style: style, nodes: node.nodes);
+      style: style, nodes: node.nodes, textAlign: textAlign);
   }
   return _BlockInlineContainer(links: node.links!,
-    style: style, nodes: node.nodes);
+    style: style, nodes: node.nodes, textAlign: textAlign);
 }
 
 class _BlockInlineContainer extends StatefulWidget {
-  const _BlockInlineContainer(
-    {required this.links, required this.style, required this.nodes});
+  const _BlockInlineContainer({
+    required this.links,
+    required this.style,
+    required this.nodes,
+    this.textAlign,
+  });
 
   final List<LinkNode> links;
-  final TextStyle? style;
+  final TextStyle style;
   final List<InlineContentNode> nodes;
+  final TextAlign? textAlign;
 
   @override
   State<_BlockInlineContainer> createState() => _BlockInlineContainerState();
@@ -377,7 +912,7 @@ class _BlockInlineContainerState extends State<_BlockInlineContainer> {
   @override
   Widget build(BuildContext context) {
     return InlineContent(recognizer: null, linkRecognizers: _recognizers,
-      style: widget.style, nodes: widget.nodes);
+      style: widget.style, nodes: widget.nodes, textAlign: widget.textAlign);
   }
 }
 
@@ -388,20 +923,38 @@ class InlineContent extends StatelessWidget {
     required this.linkRecognizers,
     required this.style,
     required this.nodes,
+    this.textAlign,
   }) {
+    assert(style.fontSize != null);
+    assert(
+      style.debugLabel!.contains('weightVariableTextStyle')
+      // ([ContentTheme.textStylePlainParagraph] applies [weightVariableTextStyle])
+      || style.debugLabel!.contains('ContentTheme.textStylePlainParagraph')
+      || style.debugLabel!.contains('bolderWghtTextStyle')
+    );
     _builder = _InlineContentBuilder(this);
   }
 
   final GestureRecognizer? recognizer;
   final Map<LinkNode, GestureRecognizer>? linkRecognizers;
-  final TextStyle? style;
+
+  /// A [TextStyle] applied to this content and provided to descendants.
+  ///
+  /// Must set [TextStyle.fontSize]. Some descendant spans will consume it,
+  /// e.g., to make their content slightly smaller than surrounding text.
+  /// Similarly must set a font weight using [weightVariableTextStyle].
+  final TextStyle style;
+
+  /// A [TextAlign] applied to this content.
+  final TextAlign? textAlign;
+
   final List<InlineContentNode> nodes;
 
   late final _InlineContentBuilder _builder;
 
   @override
   Widget build(BuildContext context) {
-    return Text.rich(_builder.build());
+    return Text.rich(_builder.build(context), textAlign: textAlign);
   }
 }
 
@@ -410,14 +963,20 @@ class _InlineContentBuilder {
 
   final InlineContent widget;
 
-  InlineSpan build() {
+  InlineSpan build(BuildContext context) {
+    assert(_context == null);
+    _context = context;
     assert(_recognizer == widget.recognizer);
     assert(_recognizerStack == null || _recognizerStack!.isEmpty);
     final result = _buildNodes(widget.nodes, style: widget.style);
+    assert(identical(_context, context));
+    _context = null;
     assert(_recognizer == widget.recognizer);
     assert(_recognizerStack == null || _recognizerStack!.isEmpty);
     return result;
   }
+
+  BuildContext? _context;
 
   // Why do we have to track `recognizer` here, rather than apply it
   // once at the top of the affected span?  Because the events don't bubble
@@ -444,50 +1003,67 @@ class _InlineContentBuilder {
   }
 
   InlineSpan _buildNode(InlineContentNode node) {
-    if (node is TextNode) {
-      return TextSpan(text: node.text, recognizer: _recognizer);
-    } else if (node is LineBreakInlineNode) {
-      // Each `<br/>` is followed by a newline, which browsers apparently ignore
-      // and our parser doesn't.  So don't do anything here.
-      return const TextSpan(text: "");
-    } else if (node is StrongNode) {
-      return _buildStrong(node);
-    } else if (node is EmphasisNode) {
-      return _buildEmphasis(node);
-    } else if (node is LinkNode) {
-      return _buildLink(node);
-    } else if (node is InlineCodeNode) {
-      return _buildInlineCode(node);
-    } else if (node is UserMentionNode) {
-      return WidgetSpan(alignment: PlaceholderAlignment.middle,
-        child: UserMention(node: node));
-    } else if (node is UnicodeEmojiNode) {
-      return TextSpan(text: node.emojiUnicode, recognizer: _recognizer);
-    } else if (node is ImageEmojiNode) {
-      return WidgetSpan(alignment: PlaceholderAlignment.middle,
-        child: MessageImageEmoji(node: node));
-    } else if (node is UnimplementedInlineContentNode) {
-      return _errorUnimplemented(node);
-    } else {
-      // TODO(dart-3): Use a sealed class / pattern matching to eliminate this case.
-      throw Exception("impossible InlineContentNode: ${node.debugHtmlText}");
+    switch (node) {
+      case TextNode():
+        return TextSpan(text: node.text, recognizer: _recognizer);
+
+      case LineBreakInlineNode():
+        // Each `<br/>` is followed by a newline, which browsers apparently ignore
+        // and our parser doesn't.  So don't do anything here.
+        return const TextSpan(text: "");
+
+      case StrongNode():
+        return _buildNodes(node.nodes,
+          style: bolderWghtTextStyle(widget.style, by: 200));
+
+      case DeletedNode():
+        return _buildNodes(node.nodes,
+          style: const TextStyle(decoration: TextDecoration.lineThrough));
+
+      case EmphasisNode():
+        return _buildNodes(node.nodes,
+          style: const TextStyle(fontStyle: FontStyle.italic));
+
+      case LinkNode():
+        final recognizer = widget.linkRecognizers?[node];
+        assert(recognizer != null);
+        _pushRecognizer(recognizer);
+        final result = _buildNodes(node.nodes,
+          // Web has the same color in light and dark mode.
+          style: TextStyle(color: const HSLColor.fromAHSL(1, 200, 1, 0.4).toColor()));
+        _popRecognizer();
+        return result;
+
+      case InlineCodeNode():
+        return _buildInlineCode(node);
+
+      case UserMentionNode():
+        return WidgetSpan(alignment: PlaceholderAlignment.middle,
+          child: UserMention(ambientTextStyle: widget.style, node: node));
+
+      case UnicodeEmojiNode():
+        return TextSpan(text: node.emojiUnicode, recognizer: _recognizer,
+          style: widget.style
+            .merge(ContentTheme.of(_context!).textStyleEmoji));
+
+      case ImageEmojiNode():
+        return WidgetSpan(alignment: PlaceholderAlignment.middle,
+          child: MessageImageEmoji(node: node));
+
+      case MathInlineNode():
+        return TextSpan(
+          style: widget.style
+            .merge(ContentTheme.of(_context!).textStyleInlineMath)
+            .apply(fontSizeFactor: kInlineCodeFontSizeFactor),
+          children: [TextSpan(text: node.texSource)]);
+
+      case GlobalTimeNode():
+        return WidgetSpan(alignment: PlaceholderAlignment.middle,
+          child: GlobalTime(node: node, ambientTextStyle: widget.style));
+
+      case UnimplementedInlineContentNode():
+        return _errorUnimplemented(node, context: _context!);
     }
-  }
-
-  InlineSpan _buildStrong(StrongNode node) => _buildNodes(node.nodes,
-    style: const TextStyle(fontWeight: FontWeight.w600));
-
-  InlineSpan _buildEmphasis(EmphasisNode node) => _buildNodes(node.nodes,
-    style: const TextStyle(fontStyle: FontStyle.italic));
-
-  InlineSpan _buildLink(LinkNode node) {
-    final recognizer = widget.linkRecognizers?[node];
-    assert(recognizer != null);
-    _pushRecognizer(recognizer);
-    final result = _buildNodes(node.nodes,
-      style: TextStyle(color: const HSLColor.fromAHSL(1, 200, 1, 0.4).toColor()));
-    _popRecognizer();
-    return result;
   }
 
   InlineSpan _buildInlineCode(InlineCodeNode node) {
@@ -514,8 +1090,12 @@ class _InlineContentBuilder {
 
     // TODO `code`: find equivalent of web's `unicode-bidi: embed; direction: ltr`
 
-    // Use a light gray background, instead of a border.
-    return _buildNodes(style: _kInlineCodeStyle, node.nodes);
+    return _buildNodes(
+      style: widget.style
+        .merge(ContentTheme.of(_context!).textStyleInlineCode)
+        .apply(fontSizeFactor: kInlineCodeFontSizeFactor),
+      node.nodes,
+    );
 
     // Another fun solution -- we can in fact have a border!  Like so:
     //   TextStyle(
@@ -535,51 +1115,26 @@ class _InlineContentBuilder {
   }
 }
 
-final _kInlineCodeStyle = kMonospaceTextStyle
-  .merge(const TextStyle(
-    backgroundColor: Color(0xffeeeeee),
-    fontSize: 0.825 * kBaseFontSize))
-  .merge(
-    // TODO(a11y) pass a BuildContext, to handle platform request for bold text.
-    //   To get one, the result of this whole computation (to the TextStyle
-    //   we get at the end) could live on one [InheritedWidget], at the
-    //   MessageList or higher, so the computation doesn't get repeated
-    //   frequently. Then consumers can just look it up on the InheritedWidget.
-    weightVariableTextStyle(null));
-
-final _kCodeBlockStyle = kMonospaceTextStyle
-  .merge(const TextStyle(
-    backgroundColor: Color.fromRGBO(255, 255, 255, 1),
-    fontSize: 0.825 * kBaseFontSize))
-  .merge(
-    // TODO(a11y) pass a BuildContext; see comment in _kInlineCodeStyle above.
-    weightVariableTextStyle(null));
-
-// const _kInlineCodeLeftBracket = '⸤';
-// const _kInlineCodeRightBracket = '⸣';
-// Some alternatives:
-// const _kInlineCodeLeftBracket = '⸢'; // end-bracket looks a lot like comma
-// const _kInlineCodeRightBracket = '⸥';
-// const _kInlineCodeLeftBracket = '｢'; // a bit bigger
-// const _kInlineCodeRightBracket = '｣';
-// const _kInlineCodeLeftBracket = '「'; // too much space
-// const _kInlineCodeRightBracket = '」';
-// const _kInlineCodeLeftBracket = '﹝'; // neat but too much space
-// const _kInlineCodeRightBracket = '﹞';
-// const _kInlineCodeLeftBracket = '❲'; // different shape, could work
-// const _kInlineCodeRightBracket = '❳';
-// const _kInlineCodeLeftBracket = '⟨'; // probably too visually similar to paren
-// const _kInlineCodeRightBracket = '⟩';
+const kInlineCodeFontSizeFactor = 0.825;
 
 class UserMention extends StatelessWidget {
-  const UserMention({super.key, required this.node});
+  const UserMention({
+    super.key,
+    required this.ambientTextStyle,
+    required this.node,
+  });
 
+  final TextStyle ambientTextStyle;
   final UserMentionNode node;
 
   @override
   Widget build(BuildContext context) {
+    final contentTheme = ContentTheme.of(context);
     return Container(
-      decoration: _kDecoration,
+      decoration: BoxDecoration(
+        // TODO(#646) different for wildcard mentions
+        color: contentTheme.colorDirectMentionBackground,
+        borderRadius: const BorderRadius.all(Radius.circular(3))),
       padding: const EdgeInsets.symmetric(horizontal: 0.2 * kBaseFontSize),
       child: InlineContent(
         // If an @-mention is inside a link, let the @-mention override it.
@@ -587,18 +1142,14 @@ class UserMention extends StatelessWidget {
         // One hopes an @-mention can't contain an embedded link.
         // (The parser on creating a UserMentionNode has a TODO to check that.)
         linkRecognizers: null,
-        style: null,
+
+        // TODO(#647) when self-user is non-silently mentioned, make bold, and:
+        // TODO(#646) when self-user is non-silently mentioned,
+        //   distinguish font color between direct and wildcard mentions
+        style: ambientTextStyle,
+
         nodes: node.nodes));
   }
-
-  static get _kDecoration => BoxDecoration(
-    gradient: const LinearGradient(
-      colors: [Color.fromRGBO(0, 0, 0, 0.1), Color.fromRGBO(0, 0, 0, 0)],
-      begin: Alignment.topCenter,
-      end: Alignment.bottomCenter),
-    border: Border.all(
-      color: const Color.fromRGBO(0xcc, 0xcc, 0xcc, 1), width: 1),
-    borderRadius: const BorderRadius.all(Radius.circular(3)));
 
 // This is a more literal translation of Zulip web's CSS.
 // But it turns out CSS `box-shadow` has a quirk we rely on there:
@@ -629,7 +1180,7 @@ class MessageImageEmoji extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final store = PerAccountStoreWidget.of(context);
-    final resolvedSrc = resolveUrl(node.src, store.account);
+    final resolvedSrc = store.tryResolveUrl(node.src);
 
     const size = 20.0;
 
@@ -642,18 +1193,132 @@ class MessageImageEmoji extends StatelessWidget {
           // Web's css makes this seem like it should be -0.5, but that looks
           // too low.
           top: -1.5,
-          child: RealmContentNetworkImage(
-            resolvedSrc,
-            filterQuality: FilterQuality.medium,
-            width: size,
-            height: size,
-          )),
+          child: resolvedSrc == null ? const SizedBox.shrink() // TODO(log)
+            : RealmContentNetworkImage(
+                resolvedSrc,
+                filterQuality: FilterQuality.medium,
+                width: size,
+                height: size,
+              )),
       ]);
   }
 }
 
+class GlobalTime extends StatelessWidget {
+  const GlobalTime({
+    super.key,
+    required this.node,
+    required this.ambientTextStyle,
+  });
+
+  final GlobalTimeNode node;
+  final TextStyle ambientTextStyle;
+
+  static final _dateFormat = DateFormat('EEE, MMM d, y, h:mm a'); // TODO(intl): localize date
+
+  @override
+  Widget build(BuildContext context) {
+    // Design taken from css for `.rendered_markdown & time` in web,
+    //   see zulip:web/styles/rendered_markdown.css .
+    final text = _dateFormat.format(node.datetime.toLocal());
+    final contentTheme = ContentTheme.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 2),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: contentTheme.colorGlobalTimeBackground,
+          border: Border.all(width: 1, color: contentTheme.colorGlobalTimeBorder),
+          borderRadius: BorderRadius.circular(3)),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 0.2 * kBaseFontSize),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                size: ambientTextStyle.fontSize!,
+                // (When GlobalTime appears in a link, it should be blue
+                // like the text.)
+                color: DefaultTextStyle.of(context).style.color!,
+                ZulipIcons.clock),
+              // Ad-hoc spacing adjustment per feedback:
+              //   https://chat.zulip.org/#narrow/stream/101-design/topic/clock.20icons/near/1729345
+              const SizedBox(width: 1),
+              Text(text, style: ambientTextStyle),
+            ]))));
+  }
+}
+
+class MessageTable extends StatelessWidget {
+  const MessageTable({super.key, required this.node});
+
+  final TableNode node;
+
+  @override
+  Widget build(BuildContext context) {
+    final contentTheme = ContentTheme.of(context);
+    return SingleChildScrollViewWithScrollbar(
+      scrollDirection: Axis.horizontal,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 5),
+        child: Table(
+          border: TableBorder.all(
+            width: 1,
+            style: BorderStyle.solid,
+            color: contentTheme.colorTableCellBorder),
+          defaultColumnWidth: const IntrinsicColumnWidth(),
+          children: List.unmodifiable(node.rows.map((row) => TableRow(
+            decoration: row.isHeader
+              ? BoxDecoration(color: contentTheme.colorTableHeaderBackground)
+              : null,
+            children: List.unmodifiable(row.cells.map((cell) =>
+              MessageTableCell(node: cell, isHeader: row.isHeader)))))))));
+  }
+}
+
+class MessageTableCell extends StatelessWidget {
+  const MessageTableCell({super.key, required this.node, required this.isHeader});
+
+  final TableCellNode node;
+  final bool isHeader;
+
+  @override
+  Widget build(BuildContext context) {
+    final textAlign = switch (node.textAlignment) {
+      TableColumnTextAlignment.left => TextAlign.left,
+      TableColumnTextAlignment.center => TextAlign.center,
+      TableColumnTextAlignment.right => TextAlign.right,
+      // The web client sets `text-align: left;` for the header cells,
+      // overriding the default browser alignment (which is `center` for header
+      // and `start` for body). By default, the [Table] widget uses `start` for
+      // text alignment, a saner choice that supports RTL text. So, defer to that.
+      // See discussion:
+      //  https://github.com/zulip/zulip-flutter/pull/1031#discussion_r1831950371
+      TableColumnTextAlignment.defaults => null,
+    };
+    return TableCell(
+      verticalAlignment: TableCellVerticalAlignment.middle,
+      child: Padding(
+        // Web has 4px padding and 1px border on all sides.
+        // In web, the 1px border grows each cell by 0.5px in all directions.
+        // Our border doesn't affect the layout, it's just painted on,
+        // so we add 0.5px on all sides to match web.
+        // Ref: https://github.com/flutter/flutter/issues/78691
+        padding: const EdgeInsets.all(4 + 0.5),
+        child: node.nodes.isEmpty
+          ? const SizedBox.shrink()
+          : _buildBlockInlineContainer(
+              node: node,
+              textAlign: textAlign,
+              style: !isHeader
+                ? DefaultTextStyle.of(context).style
+                : DefaultTextStyle.of(context).style
+                    .merge(weightVariableTextStyle(context, wght: 700))),
+      ));
+  }
+}
+
 void _launchUrl(BuildContext context, String urlString) async {
-  Future<void> showError(BuildContext context, String? message) {
+  DialogStatus showError(BuildContext context, String? message) {
     return showErrorDialog(context: context,
       title: 'Unable to open link',
       message: [
@@ -663,17 +1328,17 @@ void _launchUrl(BuildContext context, String urlString) async {
   }
 
   final store = PerAccountStoreWidget.of(context);
-  final url = tryResolveOnRealmUrl(urlString, store.account.realmUrl);
+  final url = store.tryResolveUrl(urlString);
   if (url == null) { // TODO(log)
-    await showError(context, null);
+    showError(context, null);
     return;
   }
 
   final internalNarrow = parseInternalLink(url, store);
   if (internalNarrow != null) {
-    Navigator.push(context,
+    unawaited(Navigator.push(context,
       MessageListPage.buildRoute(context: context,
-        narrow: internalNarrow));
+        narrow: internalNarrow)));
     return;
   }
 
@@ -681,20 +1346,20 @@ void _launchUrl(BuildContext context, String urlString) async {
   String? errorMessage;
   try {
     launched = await ZulipBinding.instance.launchUrl(url,
-      mode: switch (Theme.of(context).platform) {
-        // TODO(#279): On Android we settle for LaunchMode.externalApplication
-        //   because url_launcher's in-app is a weirdly bare UX.
-        //   Switch once that's fixed upstream (by us or otherwise).
-        TargetPlatform.android => UrlLaunchMode.externalApplication,
+      mode: switch (defaultTargetPlatform) {
+        // On iOS we prefer LaunchMode.externalApplication because (for
+        // HTTP URLs) LaunchMode.platformDefault uses SFSafariViewController,
+        // which gives an awkward UX as described here:
+        //  https://chat.zulip.org/#narrow/stream/48-mobile/topic/in-app.20browser/near/1169118
+        TargetPlatform.iOS => UrlLaunchMode.externalApplication,
         _ => UrlLaunchMode.platformDefault,
-      },
-    );
+      });
   } on PlatformException catch (e) {
     errorMessage = e.message;
   }
   if (!launched) { // TODO(log)
     if (!context.mounted) return;
-    await showError(context, errorMessage);
+    showError(context, errorMessage);
   }
 }
 
@@ -790,12 +1455,13 @@ class RealmContentNetworkImage extends StatelessWidget {
       gaplessPlayback: gaplessPlayback,
       filterQuality: filterQuality,
       isAntiAlias: isAntiAlias,
-
-      // Only send the auth header to the server `auth` belongs to.
-      headers: src.origin == account.realmUrl.origin
-        ? authHeader(email: account.email, apiKey: account.apiKey)
-        : null,
-
+      headers: {
+        // Only send the auth header to the server `auth` belongs to.
+        if (src.origin == account.realmUrl.origin) ...authHeader(
+          email: account.email, apiKey: account.apiKey,
+        ),
+        ...userAgentHeader(),
+      },
       cacheWidth: cacheWidth,
       cacheHeight: cacheHeight,
     );
@@ -820,7 +1486,7 @@ class Avatar extends StatelessWidget {
     return AvatarShape(
       size: size,
       borderRadius: borderRadius,
-      child: AvatarImage(userId: userId));
+      child: AvatarImage(userId: userId, size: size));
   }
 }
 
@@ -833,9 +1499,11 @@ class AvatarImage extends StatelessWidget {
   const AvatarImage({
     super.key,
     required this.userId,
+    required this.size,
   });
 
   final int userId;
+  final double size;
 
   @override
   Widget build(BuildContext context) {
@@ -848,11 +1516,21 @@ class AvatarImage extends StatelessWidget {
 
     final resolvedUrl = switch (user.avatarUrl) {
       null          => null, // TODO(#255): handle computing gravatars
-      var avatarUrl => resolveUrl(avatarUrl, store.account),
+      var avatarUrl => store.tryResolveUrl(avatarUrl),
     };
-    return (resolvedUrl == null)
-      ? const SizedBox.shrink()
-      : RealmContentNetworkImage(resolvedUrl, filterQuality: FilterQuality.medium, fit: BoxFit.cover);
+
+    if (resolvedUrl == null) {
+      return const SizedBox.shrink();
+    }
+
+    final avatarUrl = AvatarUrl.fromUserData(resolvedUrl: resolvedUrl);
+    final physicalSize = (MediaQuery.devicePixelRatioOf(context) * size).ceil();
+
+    return RealmContentNetworkImage(
+      avatarUrl.get(physicalSize),
+      filterQuality: FilterQuality.medium,
+      fit: BoxFit.cover,
+    );
   }
 }
 
@@ -884,15 +1562,10 @@ class AvatarShape extends StatelessWidget {
 // Small helpers.
 //
 
-/// Resolve `url` to `account`'s realm, if relative
-// This may dissolve when we start passing around URLs as [Uri] objects instead
-// of strings.
-Uri resolveUrl(String url, Account account) {
-  final realmUrl = account.realmUrl;
-  return realmUrl.resolve(url); // TODO handle if fails to parse
-}
-
-InlineSpan _errorUnimplemented(UnimplementedNode node) {
+InlineSpan _errorUnimplemented(UnimplementedNode node, {required BuildContext context}) {
+  final contentTheme = ContentTheme.of(context);
+  final errorStyle = contentTheme.textStyleError;
+  final errorCodeStyle = contentTheme.textStyleErrorCode;
   // For now this shows error-styled HTML code even in release mode,
   // because release mode isn't yet about general users but developer demos,
   // and we want to keep the demos honest.
@@ -900,15 +1573,15 @@ InlineSpan _errorUnimplemented(UnimplementedNode node) {
   final htmlNode = node.htmlNode;
   if (htmlNode is dom.Element) {
     return TextSpan(children: [
-      const TextSpan(text: "(unimplemented:", style: errorStyle),
+      TextSpan(text: "(unimplemented:", style: errorStyle),
       TextSpan(text: htmlNode.outerHtml, style: errorCodeStyle),
-      const TextSpan(text: ")", style: errorStyle),
+      TextSpan(text: ")", style: errorStyle),
     ]);
   } else if (htmlNode is dom.Text) {
     return TextSpan(children: [
-      const TextSpan(text: "(unimplemented: text «", style: errorStyle),
+      TextSpan(text: "(unimplemented: text «", style: errorStyle),
       TextSpan(text: htmlNode.text, style: errorCodeStyle),
-      const TextSpan(text: "»)", style: errorStyle),
+      TextSpan(text: "»)", style: errorStyle),
     ]);
   } else {
     return TextSpan(
@@ -916,9 +1589,3 @@ InlineSpan _errorUnimplemented(UnimplementedNode node) {
       style: errorStyle);
   }
 }
-
-const errorStyle = TextStyle(fontWeight: FontWeight.bold, color: Colors.red);
-
-final errorCodeStyle = kMonospaceTextStyle
-  .merge(const TextStyle(color: Colors.red))
-  .merge(weightVariableTextStyle(null)); // TODO(a11y) pass a BuildContext

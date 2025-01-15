@@ -2,15 +2,32 @@ import 'dart:io';
 
 import 'package:drift/drift.dart';
 import 'package:drift/native.dart';
+import 'package:drift/remote.dart';
 import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
+import 'package:sqlite3/common.dart';
 
 part 'database.g.dart';
 
+/// The table of [Account] records in the app's database.
 class Accounts extends Table {
+  /// The ID of this account in the app's local database.
+  ///
+  /// This uniquely identifies the account within this install of the app,
+  /// and never changes for a given account.  It has no meaning to the server,
+  /// though, or anywhere else outside this install of the app.
   Column<int>    get id => integer().autoIncrement()();
 
+  /// The URL of the Zulip realm this account is on.
+  ///
+  /// This corresponds to [GetServerSettingsResult.realmUrl].
+  /// It never changes for a given account.
   Column<String> get realmUrl => text().map(const UriConverter())();
+
+  /// The Zulip user ID of this account.
+  ///
+  /// This is the identifier the server uses for the account.
+  /// It never changes for a given account.
   Column<int>    get userId => integer()();
 
   Column<String> get email => text()();
@@ -46,7 +63,7 @@ LazyDatabase _openConnection() {
 
 @DriftDatabase(tables: [Accounts])
 class AppDatabase extends _$AppDatabase {
-  AppDatabase(QueryExecutor e) : super(e);
+  AppDatabase(super.e);
 
   AppDatabase.live() : this(_openConnection());
 
@@ -88,7 +105,21 @@ class AppDatabase extends _$AppDatabase {
     );
   }
 
-  Future<int> createAccount(AccountsCompanion values) {
-    return into(accounts).insert(values);
+  Future<int> createAccount(AccountsCompanion values) async {
+    try {
+      return await into(accounts).insert(values);
+    } catch (e) {
+      // Unwrap cause if it's a remote Drift call. On the app, it's running
+      // via a remote, but on local tests, it's running natively so
+      // unwrapping is not required.
+      final cause = (e is DriftRemoteException) ? e.remoteCause : e;
+      if (cause case SqliteException(
+              extendedResultCode: SqlExtendedError.SQLITE_CONSTRAINT_UNIQUE)) {
+        throw AccountAlreadyExistsException();
+      }
+      rethrow;
+    }
   }
 }
+
+class AccountAlreadyExistsException implements Exception {}

@@ -67,38 +67,38 @@ void main() {
 
   for (final reverse in [true, false]) {
     for (final reverseHeader in [true, false]) {
-      for (final allowOverflow in [true, false]) {
-        final name = 'sticky headers: '
-          'scroll ${reverse ? 'up' : 'down'}, '
-          'header at ${reverseHeader ? 'bottom' : 'top'}, '
-          'headers ${allowOverflow ? 'overflow' : 'bounded'}';
-        testWidgets(name, (tester) =>
-          _checkSequence(tester,
-            Axis.vertical,
-            reverse: reverse,
-            reverseHeader: reverseHeader,
-            allowOverflow: allowOverflow,
-          ));
-      }
-    }
-  }
-
-  for (final reverse in [true, false]) {
-    for (final reverseHeader in [true, false]) {
-      for (final allowOverflow in [true, false]) {
-        for (final textDirection in TextDirection.values) {
+      for (final growthDirection in GrowthDirection.values) {
+        for (final allowOverflow in [true, false]) {
           final name = 'sticky headers: '
-            '${textDirection.name.toUpperCase()} '
-            'scroll ${reverse ? 'backward' : 'forward'}, '
-            'header at ${reverseHeader ? 'end' : 'start'}, '
+            'scroll ${reverse ? 'up' : 'down'}, '
+            'header at ${reverseHeader ? 'bottom' : 'top'}, '
+            '$growthDirection, '
             'headers ${allowOverflow ? 'overflow' : 'bounded'}';
           testWidgets(name, (tester) =>
             _checkSequence(tester,
-              Axis.horizontal, textDirection: textDirection,
+              Axis.vertical,
               reverse: reverse,
               reverseHeader: reverseHeader,
+              growthDirection: growthDirection,
               allowOverflow: allowOverflow,
             ));
+
+          for (final textDirection in TextDirection.values) {
+            final name = 'sticky headers: '
+              '${textDirection.name.toUpperCase()} '
+              'scroll ${reverse ? 'backward' : 'forward'}, '
+              'header at ${reverseHeader ? 'end' : 'start'}, '
+              '$growthDirection, '
+              'headers ${allowOverflow ? 'overflow' : 'bounded'}';
+            testWidgets(name, (tester) =>
+              _checkSequence(tester,
+                Axis.horizontal, textDirection: textDirection,
+                reverse: reverse,
+                reverseHeader: reverseHeader,
+                growthDirection: growthDirection,
+                allowOverflow: allowOverflow,
+              ));
+          }
         }
       }
     }
@@ -111,6 +111,7 @@ Future<void> _checkSequence(
   TextDirection? textDirection,
   bool reverse = false,
   bool reverseHeader = false,
+  GrowthDirection growthDirection = GrowthDirection.forward,
   required bool allowOverflow,
 }) async {
   assert(textDirection != null || axis == Axis.vertical);
@@ -118,24 +119,46 @@ Future<void> _checkSequence(
     Axis.horizontal => reverseHeader ^ (textDirection == TextDirection.rtl),
     Axis.vertical   => reverseHeader,
   };
+  final reverseGrowth = (growthDirection == GrowthDirection.reverse);
 
   final controller = ScrollController();
+  const listKey = ValueKey("list");
+  const emptyKey = ValueKey("empty");
   await tester.pumpWidget(Directionality(
     textDirection: textDirection ?? TextDirection.rtl,
-    child: StickyHeaderListView(
+    child: CustomScrollView(
       controller: controller,
       scrollDirection: axis,
       reverse: reverse,
-      reverseHeader: reverseHeader,
-      children: List.generate(100, (i) => StickyHeaderItem(
-        allowOverflow: allowOverflow,
-        header: _Header(i, height: 20),
-        child: _Item(i, height: 100))))));
+      anchor: reverseGrowth ? 1.0 : 0.0,
+      center: reverseGrowth ? emptyKey : listKey,
+      slivers: [
+        SliverStickyHeaderList(
+          key: listKey,
+          headerPlacement: (reverseHeader ^ reverse)
+            ? HeaderPlacement.scrollingEnd : HeaderPlacement.scrollingStart,
+          delegate: SliverChildListDelegate(
+            List.generate(100, (i) => StickyHeaderItem(
+              allowOverflow: allowOverflow,
+              header: _Header(i, height: 20),
+              child: _Item(i, height: 100))))),
+        const SliverPadding(
+          key: emptyKey,
+          padding: EdgeInsets.zero),
+      ])));
 
-  final extent = tester.getSize(find.byType(StickyHeaderListView)).onAxis(axis);
+  final overallSize = tester.getSize(find.byType(CustomScrollView));
+  final extent = overallSize.onAxis(axis);
   assert(extent % 100 == 0);
 
-  final first = !(reverse ^ reverseHeader);
+  // A position `inset` from the center of the edge the header is found on.
+  Offset headerInset(double inset) {
+    return overallSize.center(Offset.zero)
+      + offsetInDirection(axis.coordinateDirection,
+          (extent / 2 - inset) * (headerAtCoordinateEnd ? 1 : -1));
+  }
+
+  final first = !(reverse ^ reverseHeader ^ reverseGrowth);
 
   final itemFinder = first ? find.byType(_Item).first : find.byType(_Item).last;
 
@@ -145,28 +168,40 @@ Future<void> _checkSequence(
       : tester.getBottomRight(finder).inDirection(axis.coordinateDirection);
   }
 
-  void checkState() {
-    final scrollOffset = controller.position.pixels;
+  Future<void> checkState() async {
+    // Check the header comes from the expected item.
+    final scrollOffset = controller.position.pixels * (reverseGrowth ? -1 : 1);
     final expectedHeaderIndex = first
       ? (scrollOffset / 100).floor()
       : (extent ~/ 100 - 1) + (scrollOffset / 100).ceil();
+    // print("$scrollOffset, $extent, $expectedHeaderIndex");
     check(tester.widget<_Item>(itemFinder).index).equals(expectedHeaderIndex);
     check(_headerIndex(tester)).equals(expectedHeaderIndex);
 
+    // Check the layout of the header and item.
     final expectedItemInsetExtent =
       100 - (first ? scrollOffset % 100 : (-scrollOffset) % 100);
+    final double expectedHeaderInsetExtent =
+      allowOverflow ? 20 : math.min(20, expectedItemInsetExtent);
     check(insetExtent(itemFinder)).equals(expectedItemInsetExtent);
-    check(insetExtent(find.byType(_Header))).equals(
-      allowOverflow ? 20 : math.min(20, expectedItemInsetExtent));
+    check(insetExtent(find.byType(_Header))).equals(expectedHeaderInsetExtent);
+
+    // Check the header gets hit when it should, and not when it shouldn't.
+    await tester.tapAt(headerInset(1));
+    await tester.tapAt(headerInset(expectedHeaderInsetExtent - 1));
+    check(_Header.takeTapCount()).equals(2);
+    await tester.tapAt(headerInset(extent - 1));
+    await tester.tapAt(headerInset(extent - (expectedHeaderInsetExtent - 1)));
+    check(_Header.takeTapCount()).equals(0);
   }
 
   Future<void> jumpAndCheck(double position) async {
-    controller.jumpTo(position);
+    controller.jumpTo(position * (reverseGrowth ? -1 : 1));
     await tester.pump();
-    checkState();
+    await checkState();
   }
 
-  checkState();
+  await checkState();
   await jumpAndCheck(5);
   await jumpAndCheck(10);
   await jumpAndCheck(20);
@@ -210,12 +245,21 @@ class _Header extends StatelessWidget {
   final int index;
   final double height;
 
+  static int takeTapCount() {
+    final result = _tapCount;
+    _tapCount = 0;
+    return result;
+  }
+  static int _tapCount = 0;
+
   @override
   Widget build(BuildContext context) {
     return SizedBox(
       height: height,
       width: height, // TODO clean up
-      child: Text("Header $index"));
+      child: GestureDetector(
+        onTap: () => _tapCount++,
+        child: Text("Header $index")));
   }
 }
 

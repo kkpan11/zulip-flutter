@@ -1,3 +1,6 @@
+import 'dart:convert';
+
+import 'package:flutter/foundation.dart';
 
 import '../model/localizations.dart';
 
@@ -52,6 +55,18 @@ class ZulipApiException extends ApiRequestException {
     required this.data,
     required super.message,
   }) : assert(400 <= httpStatus && httpStatus <= 499);
+
+  @override
+  String toString() {
+    final sb = StringBuffer();
+    sb.write('${objectRuntimeType(this, 'ZulipApiException')}:');
+    if (httpStatus != 400) sb.write(" $httpStatus");
+    if (code != 'BAD_REQUEST') sb.write(" $code");
+    if (data.isNotEmpty) sb.write(" ${jsonEncode(data)}");
+    sb.write(" $routeName");
+    sb.write(": $message");
+    return sb.toString();
+  }
 }
 
 /// A network-level error that prevented even getting an HTTP response.
@@ -64,6 +79,11 @@ class NetworkException extends ApiRequestException {
   final Object cause;
 
   NetworkException({required super.routeName, required super.message, required this.cause});
+
+  @override
+  String toString() {
+    return 'NetworkException: $message ($cause)';
+  }
 }
 
 /// Some kind of server-side error in handling the request.
@@ -71,7 +91,7 @@ class NetworkException extends ApiRequestException {
 /// This should always represent either some kind of operational issue
 /// on the server, or a bug in the server where its responses don't
 /// agree with the documented API.
-abstract class ServerException extends ApiRequestException {
+sealed class ServerException extends ApiRequestException {
   final int httpStatus;
 
   /// The response body, decoded as a JSON object.
@@ -112,10 +132,22 @@ class Server5xxException extends ServerException {
 ///
 /// See docs: https://zulip.com/api/rest-error-handling
 class MalformedServerResponseException extends ServerException {
+  /// The underlying exception from trying to parse the response, when applicable.
+  ///
+  /// This should be paired with the use of [Error.throwWithStackTrace]
+  /// in order to preserve the underlying exception's stack trace, which
+  /// may be more informative than the exception object itself.
+  final Object? causeException;
+
   MalformedServerResponseException({
     required super.routeName,
     required super.httpStatus,
     required super.data,
-  }) : super(message: GlobalLocalizations.zulipLocalizations
-         .errorMalformedResponse(httpStatus));
+    this.causeException,
+  }) : super(message: causeException == null
+         ? GlobalLocalizations.zulipLocalizations
+            .errorMalformedResponse(httpStatus)
+         : GlobalLocalizations.zulipLocalizations
+            .errorMalformedResponseWithCause(
+              httpStatus, causeException.toString()));
 }

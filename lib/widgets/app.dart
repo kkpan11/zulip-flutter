@@ -1,68 +1,222 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_gen/gen_l10n/zulip_localizations.dart';
+import 'package:flutter/scheduler.dart';
 
+import '../generated/l10n/zulip_localizations.dart';
+import '../log.dart';
 import '../model/localizations.dart';
-import '../model/narrow.dart';
+import '../model/store.dart';
+import '../notifications/display.dart';
 import 'about_zulip.dart';
+import 'actions.dart';
+import 'dialog.dart';
+import 'home.dart';
 import 'login.dart';
-import 'message_list.dart';
 import 'page.dart';
-import 'recent_dm_conversations.dart';
 import 'store.dart';
+import 'theme.dart';
 
-class ZulipApp extends StatelessWidget {
-  const ZulipApp({super.key});
+class ZulipApp extends StatefulWidget {
+  const ZulipApp({super.key, this.navigatorObservers});
+
+  /// Whether the app's widget tree is ready.
+  ///
+  /// This begins as false.  It transitions to true when the
+  /// [GlobalStore] has been loaded and the [MaterialApp] has been mounted,
+  /// and then remains true.
+  static ValueListenable<bool> get ready => _ready;
+  static ValueNotifier<bool> _ready = ValueNotifier(false);
+
+  /// The navigator for the whole app.
+  ///
+  /// This is always the [GlobalKey.currentState] of [navigatorKey].
+  /// If [navigatorKey] is already mounted, this future completes immediately.
+  /// Otherwise, it waits for [ready] to become true and then completes.
+  static Future<NavigatorState> get navigator {
+    final state = navigatorKey.currentState;
+    if (state != null) return Future.value(state);
+
+    assert(!ready.value);
+    final completer = Completer<NavigatorState>();
+    ready.addListener(() {
+      assert(ready.value);
+      completer.complete(navigatorKey.currentState!);
+    });
+    return completer.future;
+  }
+
+  /// A key for the navigator for the whole app.
+  ///
+  /// For code that exists entirely outside the widget tree and has no natural
+  /// [BuildContext] of its own, this enables interacting with the app's
+  /// navigation, by calling [GlobalKey.currentState] to get a [NavigatorState].
+  ///
+  /// During the app's early startup, this key will not yet be mounted.
+  /// It will always be mounted before [ready] becomes true,
+  /// and naturally before any widgets are mounted which are part of the
+  /// app's main UI managed by the navigator.
+  ///
+  /// See also [navigator], to asynchronously wait for the navigator
+  /// to be mounted.
+  static final navigatorKey = GlobalKey<NavigatorState>();
+
+  /// The [ScaffoldMessengerState] for the app.
+  ///
+  /// This is null during the app's early startup, while [ready] is still false.
+  ///
+  /// For code that exists entirely outside the widget tree and has no natural
+  /// [BuildContext] of its own, this enables controlling snack bars.
+  /// Where a relevant [BuildContext] does exist, prefer using that instead,
+  /// with [ScaffoldMessenger.of].
+  static ScaffoldMessengerState? get scaffoldMessenger {
+    final context = navigatorKey.currentContext;
+    if (context == null) return null;
+    // Not maybeOf; we use MaterialApp, which provides ScaffoldMessenger,
+    // so it's a bug if navigatorKey is mounted somewhere lacking that.
+    return ScaffoldMessenger.of(context);
+  }
+
+  /// Reset the state of [ZulipApp] statics, for testing.
+  ///
+  /// TODO refactor this better, perhaps unify with ZulipBinding
+  @visibleForTesting
+  static void debugReset() {
+    _snackBarCount = 0;
+    reportErrorToUserBriefly = defaultReportErrorToUserBriefly;
+    _ready.dispose();
+    _ready = ValueNotifier(false);
+  }
+
+  /// A list to pass through to [MaterialApp.navigatorObservers].
+  /// Useful in tests.
+  final List<NavigatorObserver>? navigatorObservers;
+
+  static int _snackBarCount = 0;
+
+  /// The callback we normally use as [reportErrorToUserBriefly].
+  static void _reportErrorToUserBriefly(String? message, {String? details}) {
+    assert(_ready.value);
+
+    if (message == null) {
+      if (_snackBarCount == 0) return;
+      assert(_snackBarCount > 0);
+      // The [SnackBar] API only exposes ways to hide ether the current snack
+      // bar or all of them.
+      //
+      // To reduce the possibility of hiding snack bars not created by this
+      // helper, only clear when there are known active snack bars.
+      scaffoldMessenger!.clearSnackBars();
+      return;
+    }
+
+    final localizations = ZulipLocalizations.of(navigatorKey.currentContext!);
+    final newSnackBar = scaffoldMessenger!.showSnackBar(
+      snackBarAnimationStyle: AnimationStyle(
+        duration: const Duration(milliseconds: 200),
+        reverseDuration: const Duration(milliseconds: 50)),
+      SnackBar(
+        content: Text(message),
+        action: (details == null) ? null : SnackBarAction(
+          label: localizations.snackBarDetails,
+          onPressed: () => showErrorDialog(context: navigatorKey.currentContext!,
+            title: localizations.errorDialogTitle,
+            message: details))));
+
+    _snackBarCount++;
+    newSnackBar.closed.whenComplete(() => _snackBarCount--);
+  }
+
+  void _declareReady() {
+    assert(navigatorKey.currentContext != null);
+    _ready.value = true;
+    reportErrorToUserBriefly = _reportErrorToUserBriefly;
+  }
+
+  @override
+  State<ZulipApp> createState() => _ZulipAppState();
+}
+
+class _ZulipAppState extends State<ZulipApp> with WidgetsBindingObserver {
+  @override
+  Future<bool> didPushRouteInformation(routeInformation) async {
+    switch (routeInformation.uri) {
+      case Uri(scheme: 'zulip', host: 'login') && var url:
+        await LoginPage.handleWebAuthUrl(url);
+        return true;
+      case Uri(scheme: 'zulip', host: 'notification') && var url:
+        await NotificationDisplayManager.navigateForNotification(url);
+        return true;
+    }
+    return super.didPushRouteInformation(routeInformation);
+  }
+
+  Future<void> _handleInitialRoute() async {
+    final initialRouteUrl = Uri.parse(WidgetsBinding.instance.platformDispatcher.defaultRouteName);
+    if (initialRouteUrl case Uri(scheme: 'zulip', host: 'notification')) {
+      await NotificationDisplayManager.navigateForNotification(initialRouteUrl);
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _handleInitialRoute();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    final theme = ThemeData(
-      // This sets up the font fallback for normal text that
-      // may contain an emoji, where it will use any font from the "sans-serif"
-      // group to fetch the glyphs and fallback to "Noto Color Emoji" for emojis.
-      //
-      // Note that specifiying only "Noto Color Emoji" in the fallback list,
-      // Flutter tries to use it to draw even the non emoji characters
-      // which leads to broken text rendering.
-      fontFamilyFallback: [
-        // …since apparently iOS doesn't support 'sans-serif', use this instead:
-        //   https://github.com/flutter/flutter/issues/63507#issuecomment-1698504425
-        if (Theme.of(context).platform == TargetPlatform.iOS) '.AppleSystemUIFont' else 'sans-serif',
-        'Noto Color Emoji',
-      ],
-      useMaterial3: false, // TODO(#225) fix things and switch to true
-      // This applies Material 3's color system to produce a palette of
-      // appropriately matching and contrasting colors for use in a UI.
-      // The Zulip brand color is a starting point, but doesn't end up as
-      // one that's directly used.  (After all, we didn't design it for that
-      // purpose; we designed a logo.)  See docs:
-      //   https://api.flutter.dev/flutter/material/ColorScheme/ColorScheme.fromSeed.html
-      // Or try this tool to see the whole palette:
-      //   https://m3.material.io/theme-builder#/custom
-      colorScheme: ColorScheme.fromSeed(seedColor: kZulipBrandColor),
-      // `preferBelow: false` seems like a better default for mobile;
-      // the area below a long-press target seems more likely to be hidden by
-      // a finger or thumb than the area above.
-      tooltipTheme: const TooltipThemeData(preferBelow: false),
-    );
+    final themeData = zulipThemeData(context);
     return GlobalStoreWidget(
-      child: MaterialApp(
-        title: 'Zulip',
-        localizationsDelegates: ZulipLocalizations.localizationsDelegates,
-        supportedLocales: ZulipLocalizations.supportedLocales,
-        theme: theme,
-        builder: (BuildContext context, Widget? child) {
-          GlobalLocalizations.zulipLocalizations = ZulipLocalizations.of(context);
-          return child!;
-        },
-        home: const ChooseAccountPage()));
+      child: Builder(builder: (context) {
+        final globalStore = GlobalStoreWidget.of(context);
+        // TODO(#524) choose initial account as last one used
+        final initialAccountId = globalStore.accounts.firstOrNull?.id;
+        return MaterialApp(
+          title: 'Zulip',
+          localizationsDelegates: ZulipLocalizations.localizationsDelegates,
+          supportedLocales: ZulipLocalizations.supportedLocales,
+          theme: themeData,
+
+          navigatorKey: ZulipApp.navigatorKey,
+          navigatorObservers: widget.navigatorObservers ?? const [],
+          builder: (BuildContext context, Widget? child) {
+            if (!ZulipApp.ready.value) {
+              SchedulerBinding.instance.addPostFrameCallback(
+                (_) => widget._declareReady());
+            }
+            GlobalLocalizations.zulipLocalizations = ZulipLocalizations.of(context);
+            return child!;
+          },
+
+          // We use onGenerateInitialRoutes for the real work of specifying the
+          // initial nav state.  To do that we need [MaterialApp] to decide to
+          // build a [Navigator]... which means specifying either `home`, `routes`,
+          // `onGenerateRoute`, or `onUnknownRoute`.  Make it `onGenerateRoute`.
+          // It never actually gets called, though: `onGenerateInitialRoutes`
+          // handles startup, and then we always push whole routes with methods
+          // like [Navigator.push], never mere names as with [Navigator.pushNamed].
+          onGenerateRoute: (_) => null,
+
+          onGenerateInitialRoutes: (_) {
+            return [
+              if (initialAccountId == null)
+                MaterialWidgetRoute(page: const ChooseAccountPage())
+              else
+                HomePage.buildRoute(accountId: initialAccountId),
+            ];
+          });
+        }));
   }
 }
-
-/// The Zulip "brand color", a purplish blue.
-///
-/// This is chosen as the sRGB midpoint of the Zulip logo's gradient.
-// As computed by Anders: https://github.com/zulip/zulip-mobile/pull/4467
-const kZulipBrandColor = Color.fromRGBO(0x64, 0x92, 0xfe, 1);
 
 class ChooseAccountPage extends StatelessWidget {
   const ChooseAccountPage({super.key});
@@ -73,125 +227,122 @@ class ChooseAccountPage extends StatelessWidget {
     required Widget title,
     Widget? subtitle,
   }) {
+    final colorScheme = ColorScheme.of(context);
+    final designVariables = DesignVariables.of(context);
+    final zulipLocalizations = ZulipLocalizations.of(context);
+    final materialLocalizations = MaterialLocalizations.of(context);
     return Card(
       clipBehavior: Clip.hardEdge,
       child: ListTile(
         title: title,
         subtitle: subtitle,
-        onTap: () => Navigator.push(context,
-          HomePage.buildRoute(accountId: accountId))));
+        tileColor: colorScheme.secondaryContainer,
+        textColor: colorScheme.onSecondaryContainer,
+        trailing: MenuAnchor(
+          menuChildren: [
+            MenuItemButton(
+              onPressed: () {
+                showSuggestedActionDialog(context: context,
+                  title: zulipLocalizations.logOutConfirmationDialogTitle,
+                  message: zulipLocalizations.logOutConfirmationDialogMessage,
+                  // TODO(#1032) "destructive" style for action button
+                  actionButtonText: zulipLocalizations.logOutConfirmationDialogConfirmButton,
+                  onActionButtonPress: () {
+                    // TODO error handling if db write fails?
+                    logOutAccount(context, accountId);
+                  });
+              },
+              child: Text(zulipLocalizations.chooseAccountPageLogOutButton)),
+          ],
+          builder: (BuildContext context, MenuController controller, Widget? child) {
+            return IconButton(
+              tooltip: materialLocalizations.showMenuTooltip, // "Show menu"
+              onPressed: () {
+                if (controller.isOpen) {
+                  controller.close();
+                } else {
+                  controller.open();
+                }
+              },
+              icon: Icon(Icons.adaptive.more, color: designVariables.icon));
+          }),
+        // The default trailing padding with M3 is 24px. Decrease by 12 because
+        // IconButton (the "…" button) comes with 12px padding on all sides.
+        contentPadding: const EdgeInsetsDirectional.only(start: 16, end: 12),
+        onTap: () => HomePage.navigate(context, accountId: accountId)));
   }
 
   @override
   Widget build(BuildContext context) {
+    final colorScheme = ColorScheme.of(context);
     final zulipLocalizations = ZulipLocalizations.of(context);
     assert(!PerAccountStoreWidget.debugExistsOf(context));
     final globalStore = GlobalStoreWidget.of(context);
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(zulipLocalizations.chooseAccountPageTitle),
-        actions: const [ChooseAccountPageOverflowButton()]),
-      body: SafeArea(
-        minimum: const EdgeInsets.all(8),
-        child: Center(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 400),
-            child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-              for (final (:accountId, :account) in globalStore.accountEntries)
-                _buildAccountItem(context,
-                  accountId: accountId,
-                  title: Text(account.realmUrl.toString()),
-                  subtitle: Text(account.email)),
-              const SizedBox(height: 12),
-              ElevatedButton(
-                onPressed: () => Navigator.push(context,
-                  AddAccountPage.buildRoute()),
-                child: Text(zulipLocalizations.chooseAccountButtonAddAnAccount)),
-            ]))),
-      ));
+
+    // Borrowed from [AppBar.build].
+    // See documentation on [ModalRoute.impliesAppBarDismissal]:
+    // > Whether an [AppBar] in the route should automatically add a back button or
+    // > close button.
+    final hasBackButton = ModalRoute.of(context)?.impliesAppBarDismissal ?? false;
+
+    return MenuButtonTheme(
+      data: MenuButtonThemeData(style: MenuItemButton.styleFrom(
+        backgroundColor: colorScheme.secondaryContainer,
+        foregroundColor: colorScheme.onSecondaryContainer)),
+      child: Scaffold(
+        appBar: AppBar(
+          titleSpacing: hasBackButton ? null : 16,
+          title: Text(zulipLocalizations.chooseAccountPageTitle),
+          actions: const [ChooseAccountPageOverflowButton()]),
+        body: SafeArea(
+          minimum: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 400),
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                Flexible(child: SingleChildScrollView(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Column(mainAxisSize: MainAxisSize.min, children: [
+                    for (final (:accountId, :account) in globalStore.accountEntries)
+                      _buildAccountItem(context,
+                        accountId: accountId,
+                        title: Text(account.realmUrl.toString()),
+                        subtitle: Text(account.email)),
+                  ]))),
+                const SizedBox(height: 12),
+                ElevatedButton(
+                  onPressed: () => Navigator.push(context,
+                    AddAccountPage.buildRoute()),
+                  child: Text(zulipLocalizations.chooseAccountButtonAddAnAccount)),
+              ]))))));
   }
 }
-
-enum ChooseAccountPageOverflowMenuItem { aboutZulip }
 
 class ChooseAccountPageOverflowButton extends StatelessWidget {
   const ChooseAccountPageOverflowButton({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return PopupMenuButton<ChooseAccountPageOverflowMenuItem>(
-      itemBuilder: (BuildContext context) => const [
-        PopupMenuItem(
-          value: ChooseAccountPageOverflowMenuItem.aboutZulip,
-          child: Text('About Zulip')),
-      ],
-      onSelected: (item) {
-        switch (item) {
-          case ChooseAccountPageOverflowMenuItem.aboutZulip:
+    final materialLocalizations = MaterialLocalizations.of(context);
+    return MenuAnchor(
+      menuChildren: [
+        MenuItemButton(
+          onPressed: () {
             Navigator.push(context, AboutZulipPage.buildRoute(context));
-        }
+          },
+          child: const Text('About Zulip')), // TODO(i18n)
+      ],
+      builder: (BuildContext context, MenuController controller, Widget? child) {
+        return IconButton(
+          tooltip: materialLocalizations.showMenuTooltip, // "Show menu"
+          onPressed: () {
+            if (controller.isOpen) {
+              controller.close();
+            } else {
+              controller.open();
+            }
+          },
+          icon: Icon(Icons.adaptive.more));
       });
-  }
-}
-
-class HomePage extends StatelessWidget {
-  const HomePage({super.key});
-
-  static Route<void> buildRoute({required int accountId}) {
-    return MaterialWidgetRoute(
-      page: PerAccountStoreWidget(accountId: accountId,
-        child: const HomePage()));
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final store = PerAccountStoreWidget.of(context);
-    final zulipLocalizations = ZulipLocalizations.of(context);
-
-    InlineSpan bold(String text) => TextSpan(
-      text: text, style: const TextStyle(fontWeight: FontWeight.bold));
-
-    int? testStreamId;
-    if (store.connection.realmUrl.origin == 'https://chat.zulip.org') {
-      testStreamId = 7; // i.e. `#test here`; TODO cut this scaffolding hack
-    }
-
-    return Scaffold(
-      appBar: AppBar(title: const Text("Home")),
-      body: Center(
-        child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-          DefaultTextStyle.merge(
-            style: const TextStyle(fontSize: 18),
-            child: Column(children: [
-              const Text('🚧 Under construction 🚧'),
-              const SizedBox(height: 12),
-              Text.rich(TextSpan(
-                text: 'Connected to: ',
-                children: [bold(store.account.realmUrl.toString())])),
-              Text.rich(TextSpan(
-                text: 'Zulip server version: ',
-                children: [bold(store.zulipVersion)])),
-              Text(zulipLocalizations.subscribedToNStreams(store.subscriptions.length)),
-            ])),
-          const SizedBox(height: 16),
-          ElevatedButton(
-            onPressed: () => Navigator.push(context,
-              MessageListPage.buildRoute(context: context,
-                narrow: const AllMessagesNarrow())),
-            child: const Text("All messages")),
-          const SizedBox(height: 16),
-          ElevatedButton(
-            onPressed: () => Navigator.push(context,
-              RecentDmConversationsPage.buildRoute(context: context)),
-            child: const Text("Direct messages")),
-          if (testStreamId != null) ...[
-            const SizedBox(height: 16),
-            ElevatedButton(
-              onPressed: () => Navigator.push(context,
-                MessageListPage.buildRoute(context: context,
-                  narrow: StreamNarrow(testStreamId!))),
-              child: const Text("#test here")), // scaffolding hack, see above
-          ],
-        ])));
   }
 }

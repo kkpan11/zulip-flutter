@@ -35,7 +35,7 @@ class MyWidgetWithMixinState extends State<MyWidgetWithMixin> with PerAccountSto
   @override
   Widget build(BuildContext context) {
     final brightness = Theme.of(context).brightness;
-    final accountId = PerAccountStoreWidget.of(context).account.id;
+    final accountId = PerAccountStoreWidget.of(context).accountId;
     return Text('brightness: $brightness; accountId: $accountId');
   }
 }
@@ -48,7 +48,7 @@ extension MyWidgetWithMixinStateChecks on Subject<MyWidgetWithMixinState> {
 void main() {
   TestZulipBinding.ensureInitialized();
 
-  testWidgets('GlobalStoreWidget', (WidgetTester tester) async {
+  testWidgets('GlobalStoreWidget', (tester) async {
     addTearDown(testBinding.reset);
 
     GlobalStore? globalStore;
@@ -87,12 +87,30 @@ void main() {
             child: Builder(
               builder: (context) {
                 final store = PerAccountStoreWidget.of(context);
-                return Text('found store, account: ${store.account.id}');
+                return Text('found store, account: ${store.accountId}');
               })))));
     await tester.pump();
     await tester.pump();
 
     tester.widget(find.text('found store, account: ${eg.selfAccount.id}'));
+  });
+
+  testWidgets('PerAccountStoreWidget.of detailed error', (tester) async {
+    addTearDown(testBinding.reset);
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: GlobalStoreWidget(
+          // no PerAccountStoreWidget
+          child: Builder(
+            builder: (context) {
+              final store = PerAccountStoreWidget.of(context);
+              return Text('found store, account: ${store.accountId}');
+            }))));
+    await tester.pump();
+    check(tester.takeException())
+      .has((x) => x.toString(), 'toString') // TODO(checks): what's a good convention for this?
+      .contains('consider MaterialAccountWidgetRoute');
   });
 
   testWidgets('PerAccountStoreWidget immediate data after first loaded', (tester) async {
@@ -109,7 +127,7 @@ void main() {
             child: Builder(
               builder: (context) {
                 final store = PerAccountStoreWidget.of(context);
-                return Text('found store, account: ${store.account.id}');
+                return Text('found store, account: ${store.accountId}');
               })))));
 
     // First, the global store has to load.
@@ -137,12 +155,12 @@ void main() {
             child: Builder(
               builder: (context) {
                 final store = PerAccountStoreWidget.of(context);
-                return Text('found store, account: ${store.account.id}');
+                return Text('found store, account: ${store.accountId}');
               })))));
 
     // (... even one that really is separate, with its own fresh state node ...)
     check(tester.state(find.byType(PerAccountStoreWidget)))
-      .not(it()..identicalTo(oldState));
+      .not((it) => it.identicalTo(oldState));
 
     // ... then its child appears immediately, without waiting to load.
     check(tester.any(find.textContaining('found store'))).isTrue();
@@ -156,6 +174,8 @@ void main() {
     await testBinding.globalStore.add(eg.selfAccount, eg.initialSnapshot());
 
     Future<void> pumpWithParams({required bool light, required int accountId}) async {
+      // TODO use [TestZulipApp]
+      //   (seeing some extraneous dep changes when trying that)
       await tester.pumpWidget(
         MaterialApp(
           theme: light ? ThemeData.light() : ThemeData.dark(),
