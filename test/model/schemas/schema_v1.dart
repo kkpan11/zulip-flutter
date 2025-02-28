@@ -1,6 +1,6 @@
+// dart format width=80
 // GENERATED CODE, DO NOT EDIT BY HAND.
 // ignore_for_file: type=lint
-//@dart=2.12
 import 'package:drift/drift.dart';
 
 class Accounts extends Table with TableInfo<Accounts, AccountsData> {
@@ -186,6 +186,25 @@ class AccountsData extends DataClass implements Insertable<AccountsData> {
             zulipMergeBase.present ? zulipMergeBase.value : this.zulipMergeBase,
         zulipFeatureLevel: zulipFeatureLevel ?? this.zulipFeatureLevel,
       );
+  AccountsData copyWithCompanion(AccountsCompanion data) {
+    return AccountsData(
+      id: data.id.present ? data.id.value : this.id,
+      realmUrl: data.realmUrl.present ? data.realmUrl.value : this.realmUrl,
+      userId: data.userId.present ? data.userId.value : this.userId,
+      email: data.email.present ? data.email.value : this.email,
+      apiKey: data.apiKey.present ? data.apiKey.value : this.apiKey,
+      zulipVersion: data.zulipVersion.present
+          ? data.zulipVersion.value
+          : this.zulipVersion,
+      zulipMergeBase: data.zulipMergeBase.present
+          ? data.zulipMergeBase.value
+          : this.zulipMergeBase,
+      zulipFeatureLevel: data.zulipFeatureLevel.present
+          ? data.zulipFeatureLevel.value
+          : this.zulipFeatureLevel,
+    );
+  }
+
   @override
   String toString() {
     return (StringBuffer('AccountsData(')

@@ -16,7 +16,7 @@ Future<InitialSnapshot> registerQueue(ApiConnection connection) {
       'notification_settings_null': true,
       'bulk_message_deletion': true,
       'user_avatar_url_field_optional': false, // TODO(#254): turn on
-      'stream_typing_notifications': false, // TODO implement
+      'stream_typing_notifications': true,
       'user_settings_object': true,
     },
   });
@@ -41,7 +41,7 @@ class GetEventsResult {
 
   GetEventsResult({
     required this.events,
-    this.queueId,
+    required this.queueId,
   });
 
   factory GetEventsResult.fromJson(Map<String, dynamic> json) =>

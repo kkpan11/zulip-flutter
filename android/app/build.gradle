@@ -1,14 +1,15 @@
+plugins {
+    id 'com.android.application'
+    id 'kotlin-android'
+    id 'dev.flutter.flutter-gradle-plugin'
+}
+
 def localProperties = new Properties()
 def localPropertiesFile = rootProject.file('local.properties')
 if (localPropertiesFile.exists()) {
     localPropertiesFile.withReader('UTF-8') { reader ->
         localProperties.load(reader)
     }
-}
-
-def flutterRoot = localProperties.getProperty('flutter.sdk')
-if (flutterRoot == null) {
-    throw new GradleException("Flutter SDK not found. Define location with flutter.sdk in the local.properties file.")
 }
 
 def keystoreProperties = new Properties()
@@ -18,13 +19,10 @@ try {
     keystoreProperties = null
 }
 
-apply plugin: 'com.android.application'
-apply plugin: 'kotlin-android'
-apply from: "$flutterRoot/packages/flutter_tools/gradle/flutter.gradle"
-
 android {
+    namespace "com.zulip.flutter"
+
     compileSdkVersion flutter.compileSdkVersion
-    ndkVersion flutter.ndkVersion
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_1_8
@@ -41,7 +39,7 @@ android {
 
     defaultConfig {
         applicationId "com.zulip.flutter"
-        minSdkVersion flutter.minSdkVersion
+        minSdkVersion 28
         targetSdkVersion flutter.targetSdkVersion
         // These are synced to local.properties from pubspec.yaml by the flutter tool.
         versionCode localProperties.getProperty('flutter.versionCode').toInteger()
@@ -73,6 +71,23 @@ android {
                     signingConfigs.release : signingConfigs.debug
         }
     }
+
+    lint {
+        // For docs on options available here:
+        //   https://developer.android.com/reference/tools/gradle-api/8.5/com/android/build/api/dsl/Lint
+        checkAllWarnings = true
+        warningsAsErrors = true
+    }
+}
+
+tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+    // Compile Kotlin with `-Werror`... but only in release builds, so that it
+    // doesn't get in the way of quick local experiments for debugging.
+    //
+    // The string-searching makes this a bit of a mess, but it works.
+    // Better would be if we can add this to android.buildTypes.release above;
+    // but on a first attempt that didn't work (it affected debug builds too).
+    kotlinOptions.allWarningsAsErrors = name.contains("Release")
 }
 
 flutter {
@@ -80,5 +95,5 @@ flutter {
 }
 
 dependencies {
-    implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk7:$kotlin_version"
+    implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk7:$kotlinVersion"
 }

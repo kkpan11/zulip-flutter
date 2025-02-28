@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 
 import '../model/binding.dart';
 import '../model/store.dart';
+import 'page.dart';
 
 /// Provides access to the app's data.
 ///
@@ -12,8 +14,13 @@ import '../model/store.dart';
 ///  * [PerAccountStoreWidget], for the user's data associated with a
 ///    particular Zulip account.
 class GlobalStoreWidget extends StatefulWidget {
-  const GlobalStoreWidget({super.key, required this.child});
+  const GlobalStoreWidget({
+    super.key,
+    this.placeholder = const LoadingPlaceholder(),
+    required this.child,
+  });
 
+  final Widget placeholder;
   final Widget child;
 
   /// The app's global data store.
@@ -55,7 +62,7 @@ class _GlobalStoreWidgetState extends State<GlobalStoreWidget> {
   void initState() {
     super.initState();
     (() async {
-      final store = await ZulipBinding.instance.loadGlobalStore();
+      final store = await ZulipBinding.instance.getGlobalStoreUniquely();
       setState(() {
         this.store = store;
       });
@@ -65,8 +72,7 @@ class _GlobalStoreWidgetState extends State<GlobalStoreWidget> {
   @override
   Widget build(BuildContext context) {
     final store = this.store;
-    // TODO: factor out the use of LoadingPage to be configured by the widget, like [widget.child] is
-    if (store == null) return const LoadingPage();
+    if (store == null) return widget.placeholder;
     return _GlobalStoreInheritedWidget(store: store, child: widget.child);
   }
 }
@@ -107,10 +113,20 @@ class PerAccountStoreWidget extends StatefulWidget {
   const PerAccountStoreWidget({
     super.key,
     required this.accountId,
+    this.placeholder = const LoadingPlaceholder(),
+    this.routeToRemoveOnLogout,
     required this.child,
   });
 
   final int accountId;
+  final Widget placeholder;
+
+  /// A per-account [Route] that should be removed on logout.
+  ///
+  /// Use this when the widget is a page on a route that should go away
+  /// when the account is logged out, instead of lingering with [placeholder].
+  final AccountPageRouteMixin? routeToRemoveOnLogout;
+
   final Widget child;
 
   /// The user's data for the relevant Zulip account for this widget.
@@ -135,17 +151,20 @@ class PerAccountStoreWidget extends StatefulWidget {
   /// use [State.didChangeDependencies] instead.  For discussion, see
   /// [BuildContext.dependOnInheritedWidgetOfExactType].
   ///
+  /// A [State] that calls this method in [State.didChangeDependencies]
+  /// should typically also mix in [PerAccountStoreAwareStateMixin],
+  /// in order to handle the store itself being replaced with a new store.
+  /// This happens in particular if the old store's event queue expires
+  /// on the server.
+  ///
   /// See also:
   ///  * [accountIdOf], for the account ID corresponding to the same data.
   ///  * [GlobalStoreWidget.of], for the app's data beyond that of a
   ///    particular account.
   ///  * [InheritedNotifier], which provides the "dependency" mechanism.
-  // TODO(#185): Explain in dartdoc that the returned [PerAccountStore] might
-  //   differ from one call to the next, and to handle that with
-  //   [PerAccountStoreAwareStateMixin].
   static PerAccountStore of(BuildContext context) {
     final widget = context.dependOnInheritedWidgetOfExactType<_PerAccountStoreInheritedWidget>();
-    assert(widget != null, 'No PerAccountStoreWidget ancestor');
+    assert(_debugCheckFound(context, widget));
     return widget!.store;
   }
 
@@ -164,10 +183,27 @@ class PerAccountStoreWidget extends StatefulWidget {
   /// Like [of], the cost of this method is O(1) with a small constant factor.
   static int accountIdOf(BuildContext context) {
     final element = context.getElementForInheritedWidgetOfExactType<_PerAccountStoreInheritedWidget>();
-    assert(element != null, 'No PerAccountStoreWidget ancestor');
+    assert(_debugCheckFound(context, element));
     final widget = element!.findAncestorWidgetOfExactType<PerAccountStoreWidget>();
     assert(widget != null);
     return widget!.accountId;
+  }
+
+  static bool _debugCheckFound(BuildContext context, Object? ancestor) {
+    // Compare [debugCheckHasMediaQuery], and its caller [MediaQuery.of].
+    assert(() {
+      if (ancestor != null) return true;
+      throw FlutterError.fromParts([
+        ErrorSummary('No PerAccountStoreWidget ancestor found.'),
+        ErrorDescription('${context.widget.runtimeType} widgets require a PerAccountStoreWidget ancestor.'),
+        context.describeWidget('The specific widget that could not find a PerAccountStoreWidget ancestor was'),
+        context.describeOwnershipChain('The ownership chain for the affected widget is'),
+        ErrorHint('For a new page in the app, consider MaterialAccountWidgetRoute '
+          'or AccountPageRouteBuilder.'),
+        ErrorHint('In tests, consider TestZulipApp with its accountId field.'),
+      ]);
+    }());
+    return true;
   }
 
   /// Whether there is a relevant account specified for this widget.
@@ -186,20 +222,40 @@ class _PerAccountStoreWidgetState extends State<PerAccountStoreWidget> {
   void didChangeDependencies() {
     super.didChangeDependencies();
     final globalStore = GlobalStoreWidget.of(context);
+    final accountExists = globalStore.getAccount(widget.accountId) != null;
+    if (!accountExists) {
+      // logged out
+      _setStore(null);
+      if (widget.routeToRemoveOnLogout != null) {
+        SchedulerBinding.instance.addPostFrameCallback(
+          (_) => Navigator.of(context).removeRoute(widget.routeToRemoveOnLogout!));
+      }
+      return;
+    }
     // If we already have data, get it immediately. This avoids showing one
     // frame of loading indicator each time we have a new PerAccountStoreWidget.
     final store = globalStore.perAccountSync(widget.accountId);
     if (store != null) {
       _setStore(store);
     } else {
-      // If we don't already have data, wait for it.
-      (() async {
-        _setStore(await globalStore.perAccount(widget.accountId));
-      })();
+      // If we don't already have data, request it.
+      () async {
+        try {
+          // If this succeeds, globalStore will notify listeners, and
+          // [didChangeDependencies] will run again, this time in the
+          // `store != null` case above.
+          await globalStore.perAccount(widget.accountId);
+        } on AccountNotFoundException {
+          // The account was logged out while its store was loading.
+          // This widget will be showing [placeholder] perpetually,
+          // but that's OK as long as other code will be removing it from the UI
+          // (usually by using [routeToRemoveOnLogout]).
+        }
+      }();
     }
   }
 
-  void _setStore(PerAccountStore store) {
+  void _setStore(PerAccountStore? store) {
     if (store != this.store) {
       setState(() {
         this.store = store;
@@ -219,8 +275,7 @@ class _PerAccountStoreWidgetState extends State<PerAccountStoreWidget> {
 
   @override
   Widget build(BuildContext context) {
-    // TODO: factor out the use of LoadingPage to be configured by the widget, like [widget.child] is
-    if (store == null) return const LoadingPage();
+    if (store == null) return widget.placeholder;
     return _PerAccountStoreInheritedWidget(store: store!, child: widget.child);
   }
 }
@@ -241,8 +296,8 @@ class _PerAccountStoreInheritedWidget extends InheritedNotifier<PerAccountStore>
     store != oldWidget.store;
 }
 
-class LoadingPage extends StatelessWidget {
-  const LoadingPage({super.key});
+class LoadingPlaceholder extends StatelessWidget {
+  const LoadingPlaceholder({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -255,13 +310,11 @@ class LoadingPage extends StatelessWidget {
 /// The ambient [PerAccountStore] can be replaced in some circumstances,
 /// such as when an event queue expires. See [PerAccountStoreWidget.of].
 /// When that happens, stateful widgets should
-/// - remove listeners on the old [PerAccountStore], and
+/// - stop using the old [PerAccountStore], which will already have
+///   been disposed;
 /// - add listeners on the new one.
 ///
 /// Use this mixin, overriding [onNewStore], to do that concisely.
-// TODO(#185): Until #185, I think [PerAccountStoreWidget.of] never actually
-//   returns a different [PerAccountStore] from one call to the next.
-//   But it will, and when it does, we want our [StatefulWidgets] to handle it.
 mixin PerAccountStoreAwareStateMixin<T extends StatefulWidget> on State<T> {
   PerAccountStore? _store;
 
@@ -272,8 +325,9 @@ mixin PerAccountStoreAwareStateMixin<T extends StatefulWidget> on State<T> {
   /// and again whenever dependencies change so that [PerAccountStoreWidget.of]
   /// would return a different store from previously.
   ///
-  /// In this, remove any listeners on the old store
-  /// and add them on the new store.
+  /// In this, add any needed listeners on the new store
+  /// and drop any references to the old store, which will already
+  /// have been disposed.
   void onNewStore();
 
   @override

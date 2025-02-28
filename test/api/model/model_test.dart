@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:checks/checks.dart';
+import 'package:json_annotation/json_annotation.dart';
 import 'package:test/scaffolding.dart';
 import 'package:zulip/api/model/model.dart';
 
@@ -15,7 +16,8 @@ void main() {
       "1": {"text": "Option 1", "order": 2},
       "2": {"text": "Option 2", "order": 3}
     }''';
-    final choices = CustomProfileFieldChoiceDataItem.parseFieldDataChoices(jsonDecode(input));
+    final decoded = jsonDecode(input) as Map<String, dynamic>;
+    final choices = CustomProfileFieldChoiceDataItem.parseFieldDataChoices(decoded);
     check(choices).jsonEquals({
       '0': const CustomProfileFieldChoiceDataItem(text: 'Option 0'),
       '1': const CustomProfileFieldChoiceDataItem(text: 'Option 1'),
@@ -47,7 +49,7 @@ void main() {
     }
 
     test('delivery_email', () {
-      check(mkUser({'delivery_email': 'name@email.com'}).deliveryEmailStaleDoNotUse)
+      check(mkUser({'delivery_email': 'name@email.com'}).deliveryEmail)
         .equals('name@email.com');
     });
 
@@ -55,17 +57,49 @@ void main() {
       check(mkUser({'profile_data': <String, dynamic>{}}).profileData).isNull();
       check(mkUser({'profile_data': null}).profileData).isNull();
       check(mkUser({'profile_data': {'1': {'value': 'foo'}}}).profileData)
-        .isNotNull().deepEquals({1: it()});
+        .isNotNull().keys.single.equals(1);
     });
 
     test('is_system_bot', () {
-      check(mkUser({}).isSystemBot).isNull();
-      check(mkUser({'is_cross_realm_bot': true}).isSystemBot).equals(true);
-      check(mkUser({'is_system_bot': true}).isSystemBot).equals(true);
+      check(mkUser({}).isSystemBot).isFalse();
+      check(mkUser({'is_cross_realm_bot': true}).isSystemBot).isTrue();
+      check(mkUser({'is_system_bot': true}).isSystemBot).isTrue();
+    });
+  });
+
+  group('Subscription', () {
+    test('converts color to int', () {
+      Subscription subWithColor(String color) {
+        return Subscription.fromJson(
+          deepToJson(eg.subscription(eg.stream())) as Map<String, dynamic>
+            ..['color'] = color,
+        );
+      }
+      check(subWithColor('#e79ab5').color).equals(0xffe79ab5);
+      check(subWithColor('#ffffff').color).equals(0xffffffff);
+      check(subWithColor('#000000').color).equals(0xff000000);
     });
   });
 
   group('Message', () {
+    Map<String, dynamic> baseStreamJson() =>
+      deepToJson(eg.streamMessage()) as Map<String, dynamic>;
+
+    test('subject -> topic', () {
+      check(baseStreamJson()).not((it) => it.containsKey('topic'));
+      check(Message.fromJson(baseStreamJson()
+        ..['subject'] = 'hello'
+      )).isA<StreamMessage>()
+        .topic.equals(const TopicName('hello'));
+    });
+
+    test('match_subject -> matchTopic', () {
+      check(baseStreamJson()).not((it) => it.containsKey('match_topic'));
+      check(Message.fromJson(baseStreamJson()
+        ..['match_subject'] = 'yo'
+      )).matchTopic.equals('yo');
+    });
+
     test('no crash on unrecognized flag', () {
       final m1 = Message.fromJson(
         (deepToJson(eg.streamMessage()) as Map<String, dynamic>)
@@ -78,6 +112,54 @@ void main() {
           ..['flags'] = ['read', 'something_unknown'],
       );
       check(m2).flags.deepEquals([MessageFlag.read, MessageFlag.unknown]);
+    });
+
+    test('require displayRecipient on parse', () {
+      check(() => StreamMessage.fromJson(baseStreamJson()..['display_recipient'] = null))
+        .throws<DisallowedNullValueException>();
+
+      check(() => StreamMessage.fromJson(baseStreamJson()..remove('display_recipient')))
+        .throws<MissingRequiredKeysException>();
+    });
+
+    // Code relevant to messageEditState is tested separately in the
+    // MessageEditState group.
+  });
+
+  group('TopicName', () {
+    test('unresolve', () {
+      void doCheck(TopicName input, TopicName expected) {
+        final output = input.unresolve();
+        check(output).apiName.equals(expected.apiName);
+      }
+
+      doCheck(eg.t('some topic'),       eg.t('some topic'));
+      doCheck(eg.t('Some Topic'),       eg.t('Some Topic'));
+      doCheck(eg.t('✔ some topic'),     eg.t('some topic'));
+      doCheck(eg.t('✔ Some Topic'),     eg.t('Some Topic'));
+
+      doCheck(eg.t('Some ✔ Topic'),     eg.t('Some ✔ Topic'));
+      doCheck(eg.t('✔ Some ✔ Topic'),   eg.t('Some ✔ Topic'));
+
+      doCheck(eg.t('✔ ✔✔✔ some topic'), eg.t('some topic'));
+      doCheck(eg.t('✔ ✔ ✔✔some topic'), eg.t('some topic'));
+    });
+
+    test('isSameAs', () {
+      void doCheck(TopicName topicA, TopicName topicB, bool expected) {
+        check(topicA.isSameAs(topicB)).equals(expected);
+      }
+
+      doCheck(eg.t('some topic'),   eg.t('some topic'),   true);
+      doCheck(eg.t('SOME TOPIC'),   eg.t('SOME TOPIC'),   true);
+      doCheck(eg.t('Some Topic'),   eg.t('sOME tOPIC'),   true);
+      doCheck(eg.t('✔ a'),          eg.t('✔ a'),          true);
+
+      doCheck(eg.t('✔ some topic'), eg.t('some topic'),   false);
+      doCheck(eg.t('SOME TOPIC'),   eg.t('✔ SOME TOPIC'), false);
+      doCheck(eg.t('✔ Some Topic'), eg.t('sOME tOPIC'),   false);
+
+      doCheck(eg.t('✔ a'),          eg.t('✔ b'),          false);
     });
   });
 
@@ -141,6 +223,137 @@ void main() {
         .deepEquals([2, 3, 11]);
       check(parse(withRecipients([user11, user2, user3])).allRecipientIds)
         .deepEquals([2, 3, 11]);
+    });
+  });
+
+  group('MessageEditState', () {
+    Map<String, dynamic> baseJson() => deepToJson(eg.streamMessage()) as Map<String, dynamic>;
+
+    group('Edit history is absent', () {
+      test('Message with no evidence of an edit history -> none', () {
+        check(Message.fromJson(baseJson()..['edit_history'] = null))
+          .editState.equals(MessageEditState.none);
+      });
+
+      test('Message without edit history has last edit timestamp -> edited', () {
+        check(Message.fromJson(baseJson()
+            ..['edit_history'] = null
+            ..['last_edit_timestamp'] = 1678139636))
+          .editState.equals(MessageEditState.edited);
+      });
+    });
+
+    void checkEditState(MessageEditState editState, List<Map<String, dynamic>> editHistory){
+      check(Message.fromJson(baseJson()..['edit_history'] = editHistory))
+        .editState.equals(editState);
+    }
+
+    group('edit history exists', () {
+      test('Moved message has last edit timestamp but no actual edits -> moved', () {
+        check(Message.fromJson(baseJson()
+            ..['edit_history'] = [{'prev_stream': 5, 'stream': 7}]
+            ..['last_edit_timestamp'] = 1678139636))
+          .editState.equals(MessageEditState.moved);
+      });
+
+      test('Channel change only -> moved', () {
+        checkEditState(MessageEditState.moved,
+          [{'prev_stream': 5, 'stream': 7}]);
+      });
+
+      test('Topic name change only -> moved', () {
+        checkEditState(MessageEditState.moved,
+          [{'prev_topic': 'old_topic', 'topic': 'new_topic'}]);
+      });
+
+      test('Both topic and content changed -> edited', () {
+        checkEditState(MessageEditState.edited, [
+          {'prev_topic': 'old_topic', 'topic': 'new_topic'},
+          {'prev_content': 'old_content'},
+        ]);
+        checkEditState(MessageEditState.edited, [
+          {'prev_content': 'old_content'},
+          {'prev_topic': 'old_topic', 'topic': 'new_topic'},
+        ]);
+      });
+
+      test('Both topic and content changed in a single edit -> edited', () {
+        checkEditState(MessageEditState.edited,
+          [{'prev_topic': 'old_topic', 'topic': 'new_topic', 'prev_content': 'old_content'}]);
+      });
+
+      test('Content change only -> edited', () {
+        checkEditState(MessageEditState.edited,
+          [{'prev_content': 'old_content'}]);
+      });
+
+      test("'prev_topic' present without the 'topic' field -> moved", () {
+        checkEditState(MessageEditState.moved,
+          [{'prev_topic': 'old_topic'}]);
+      });
+
+      test("'prev_subject' present from a pre-5.0 server -> moved", () {
+        checkEditState(MessageEditState.moved,
+          [{'prev_subject': 'old_topic'}]);
+      });
+    });
+
+    group('topic resolved in edit history', () {
+      test('Topic was only resolved -> none', () {
+        checkEditState(MessageEditState.none,
+          [{'prev_topic': 'old_topic', 'topic': '✔ old_topic'}]);
+      });
+
+      test('Topic was resolved but the content changed in the history -> edited', () {
+        checkEditState(MessageEditState.edited, [
+          {'prev_topic': 'old_topic', 'topic': '✔ old_topic'},
+          {'prev_content': 'old_content'},
+        ]);
+      });
+
+      test('Topic was resolved but it also moved in the history -> moved', () {
+        checkEditState(MessageEditState.moved, [
+          {'prev_topic': 'old_topic', 'topic': 'new_topic'},
+          {'prev_topic': '✔ old_topic', 'topic': 'old_topic'},
+        ]);
+      });
+
+      test('Topic was moved but it also was resolved in the history -> moved', () {
+        checkEditState(MessageEditState.moved, [
+          {'prev_topic': '✔ old_topic', 'topic': 'old_topic'},
+          {'prev_topic': 'old_topic', 'topic': 'new_topic'},
+        ]);
+      });
+
+      // Technically the topic *was* unresolved, so MessageEditState.none
+      // would be valid and preferable -- if it didn't need more intense
+      // computation than we're comfortable with in a hot codepath, i.e.,
+      // a regex test instead of a simple `startsWith` / `substring` check.
+      // See comment on the implementation, and discussion:
+      //   https://github.com/zulip/zulip-flutter/pull/1242#discussion_r1917592157
+      test('Unresolving topic with a weird prefix -> moved', () {
+          checkEditState(MessageEditState.moved,
+            [{'prev_topic': '✔ ✔old_topic', 'topic': 'old_topic'}]);
+      });
+
+      // Similar reasoning as in the previous test.
+      // Also, Zulip doesn't produce topics with a weird resolved-topic prefix,
+      // so this case can only be produced by unusual input in an
+      // edit/move-topic UI. A "moved" marker seems like a fine response
+      // in that circumstance.
+      test('Resolving topic with a weird prefix -> moved', () {
+          checkEditState(MessageEditState.moved,
+            [{'prev_topic': 'old_topic', 'topic': '✔ ✔old_topic'}]);
+      });
+
+      // Similar reasoning as the previous test, including that this case had to
+      // involve unusual input in an edit/move-topic UI.
+      // Here the computation burden would have come from calling
+      // [TopicName.canonicalize].
+      test('Topic was resolved but with changed case -> moved', () {
+        checkEditState(MessageEditState.moved,
+          [{'prev_topic': 'old ToPiC', 'topic': '✔ OLD tOpIc'}]);
+      });
     });
   });
 }

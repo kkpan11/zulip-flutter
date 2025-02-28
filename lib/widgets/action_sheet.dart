@@ -1,98 +1,680 @@
+import 'dart:async';
+
+import 'package:collection/collection.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_gen/gen_l10n/zulip_localizations.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../api/exception.dart';
 import '../api/model/model.dart';
+import '../api/route/channels.dart';
 import '../api/route/messages.dart';
+import '../generated/l10n/zulip_localizations.dart';
+import '../model/emoji.dart';
+import '../model/internal_link.dart';
+import '../model/narrow.dart';
+import 'actions.dart';
 import 'clipboard.dart';
+import 'color.dart';
 import 'compose_box.dart';
 import 'dialog.dart';
-import 'draggable_scrollable_modal_bottom_sheet.dart';
+import 'emoji.dart';
+import 'emoji_reaction.dart';
+import 'icons.dart';
+import 'inset_shadow.dart';
 import 'message_list.dart';
+import 'page.dart';
 import 'store.dart';
+import 'text.dart';
+import 'theme.dart';
+
+void _showActionSheet(
+  BuildContext context, {
+  required List<Widget> optionButtons,
+}) {
+  showModalBottomSheet<void>(
+    context: context,
+    // Clip.hardEdge looks bad; Clip.antiAliasWithSaveLayer looks pixel-perfect
+    // on my iPhone 13 Pro but is marked as "much slower":
+    //   https://api.flutter.dev/flutter/dart-ui/Clip.html
+    clipBehavior: Clip.antiAlias,
+    useSafeArea: true,
+    isScrollControlled: true,
+    builder: (BuildContext _) {
+      return SafeArea(
+        minimum: const EdgeInsets.only(bottom: 16),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // TODO(#217): show message text
+              Flexible(child: InsetShadowBox(
+                top: 8, bottom: 8,
+                color: DesignVariables.of(context).bgContextMenu,
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.only(top: 16, bottom: 8),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(7),
+                    child: Column(spacing: 1,
+                      children: optionButtons))))),
+              const ActionSheetCancelButton(),
+            ])));
+    });
+}
+
+/// A button in an action sheet.
+///
+/// When built from server data, the action sheet ignores changes in that data;
+/// we intentionally don't live-update the buttons on events.
+/// If a button's label, action, or position changes suddenly,
+/// it can be confusing and make the on-tap behavior unexpected.
+/// Better to let the user decide to tap
+/// based on information that's comfortably in their working memory,
+/// even if we sometimes have to explain (where we handle the tap)
+/// that that information has changed and they need to decide again.
+///
+/// (Even if we did live-update the buttons, it's possible anyway that a user's
+/// action can race with a change that's already been applied on the server,
+/// because it takes some time for the server to report changes to us.)
+abstract class ActionSheetMenuItemButton extends StatelessWidget {
+  const ActionSheetMenuItemButton({super.key, required this.pageContext});
+
+  IconData get icon;
+  String label(ZulipLocalizations zulipLocalizations);
+
+  /// Called when the button is pressed, after dismissing the action sheet.
+  ///
+  /// If the action may take a long time, this method is responsible for
+  /// arranging any form of progress feedback that may be desired.
+  ///
+  /// For operations that need a [BuildContext], see [pageContext].
+  void onPressed();
+
+  /// A context within the [MessageListPage] this action sheet was
+  /// triggered from.
+  final BuildContext pageContext;
+
+  /// The [MessageListPageState] this action sheet was triggered from.
+  ///
+  /// Uses the inefficient [BuildContext.findAncestorStateOfType];
+  /// don't call this in a build method.
+  MessageListPageState findMessageListPage() {
+    assert(pageContext.mounted,
+      'findMessageListPage should be called only when pageContext is known to still be mounted');
+    return MessageListPage.ancestorOf(pageContext);
+  }
+
+  void _handlePressed(BuildContext context) {
+    // Dismiss the enclosing action sheet immediately,
+    // for swift UI feedback that the user's selection was received.
+    Navigator.of(context).pop();
+
+    assert(pageContext.mounted);
+    onPressed();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final designVariables = DesignVariables.of(context);
+    final zulipLocalizations = ZulipLocalizations.of(context);
+    return MenuItemButton(
+      trailingIcon: Icon(icon, color: designVariables.contextMenuItemText),
+      style: MenuItemButton.styleFrom(
+        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+        foregroundColor: designVariables.contextMenuItemText,
+        splashFactory: NoSplash.splashFactory,
+      ).copyWith(backgroundColor: WidgetStateColor.resolveWith((states) =>
+          designVariables.contextMenuItemBg.withFadedAlpha(
+            states.contains(WidgetState.pressed) ? 0.20 : 0.12))),
+      onPressed: () => _handlePressed(context),
+      child: Text(label(zulipLocalizations),
+        style: const TextStyle(fontSize: 20, height: 24 / 20)
+          .merge(weightVariableTextStyle(context, wght: 600)),
+      ));
+  }
+}
+
+class ActionSheetCancelButton extends StatelessWidget {
+  const ActionSheetCancelButton({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final designVariables = DesignVariables.of(context);
+    return TextButton(
+      style: TextButton.styleFrom(
+        minimumSize: const Size.fromHeight(44),
+        padding: const EdgeInsets.all(10),
+        foregroundColor: designVariables.contextMenuCancelText,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(7)),
+        splashFactory: NoSplash.splashFactory,
+      ).copyWith(backgroundColor: WidgetStateColor.fromMap({
+        WidgetState.pressed: designVariables.contextMenuCancelPressedBg,
+        ~WidgetState.pressed: designVariables.contextMenuCancelBg,
+      })),
+      onPressed: () {
+        Navigator.pop(context);
+      },
+      child: Text(ZulipLocalizations.of(context).dialogCancel,
+        style: const TextStyle(fontSize: 20, height: 24 / 20)
+          .merge(weightVariableTextStyle(context, wght: 600))));
+  }
+}
+
+/// Show a sheet of actions you can take on a topic.
+///
+/// Needs a [PageRoot] ancestor.
+///
+/// The API request for resolving/unresolving a topic needs a message ID.
+/// If [someMessageIdInTopic] is null, the button for that will be absent.
+void showTopicActionSheet(BuildContext context, {
+  required int channelId,
+  required TopicName topic,
+  required int? someMessageIdInTopic,
+}) {
+  final pageContext = PageRoot.contextOf(context);
+
+  final store = PerAccountStoreWidget.of(pageContext);
+  final subscription = store.subscriptions[channelId];
+
+  final optionButtons = <ActionSheetMenuItemButton>[];
+
+  // TODO(server-7): simplify this condition away
+  final supportsUnmutingTopics = store.zulipFeatureLevel >= 170;
+  // TODO(server-8): simplify this condition away
+  final supportsFollowingTopics = store.zulipFeatureLevel >= 219;
+
+  final visibilityOptions = <UserTopicVisibilityPolicy>[];
+  final visibilityPolicy = store.topicVisibilityPolicy(channelId, topic);
+  if (subscription == null) {
+    // Not subscribed to the channel; there is no user topic change to be made.
+  } else if (!subscription.isMuted) {
+    // Channel is subscribed and not muted.
+    switch (visibilityPolicy) {
+      case UserTopicVisibilityPolicy.muted:
+        visibilityOptions.add(UserTopicVisibilityPolicy.none);
+        if (supportsFollowingTopics) {
+          visibilityOptions.add(UserTopicVisibilityPolicy.followed);
+        }
+      case UserTopicVisibilityPolicy.none:
+      case UserTopicVisibilityPolicy.unmuted:
+        visibilityOptions.add(UserTopicVisibilityPolicy.muted);
+        if (supportsFollowingTopics) {
+          visibilityOptions.add(UserTopicVisibilityPolicy.followed);
+        }
+      case UserTopicVisibilityPolicy.followed:
+        visibilityOptions.add(UserTopicVisibilityPolicy.muted);
+        if (supportsFollowingTopics) {
+          visibilityOptions.add(UserTopicVisibilityPolicy.none);
+        }
+      case UserTopicVisibilityPolicy.unknown:
+        // TODO(#1074): This should be unreachable as we keep `unknown` out of
+        //   our data structures.
+        assert(false);
+    }
+  } else {
+    // Channel is muted.
+    if (supportsUnmutingTopics) {
+      switch (visibilityPolicy) {
+        case UserTopicVisibilityPolicy.none:
+        case UserTopicVisibilityPolicy.muted:
+          visibilityOptions.add(UserTopicVisibilityPolicy.unmuted);
+          if (supportsFollowingTopics) {
+            visibilityOptions.add(UserTopicVisibilityPolicy.followed);
+          }
+        case UserTopicVisibilityPolicy.unmuted:
+          visibilityOptions.add(UserTopicVisibilityPolicy.muted);
+          if (supportsFollowingTopics) {
+            visibilityOptions.add(UserTopicVisibilityPolicy.followed);
+          }
+        case UserTopicVisibilityPolicy.followed:
+          visibilityOptions.add(UserTopicVisibilityPolicy.muted);
+          if (supportsFollowingTopics) {
+            visibilityOptions.add(UserTopicVisibilityPolicy.none);
+          }
+        case UserTopicVisibilityPolicy.unknown:
+          // TODO(#1074): This should be unreachable as we keep `unknown` out of
+          //   our data structures.
+          assert(false);
+      }
+    }
+  }
+  optionButtons.addAll(visibilityOptions.map((to) {
+    return UserTopicUpdateButton(
+      currentVisibilityPolicy: visibilityPolicy,
+      newVisibilityPolicy: to,
+      narrow: TopicNarrow(channelId, topic),
+      pageContext: pageContext);
+  }));
+
+  if (someMessageIdInTopic != null) {
+    optionButtons.add(ResolveUnresolveButton(pageContext: pageContext,
+      topic: topic,
+      someMessageIdInTopic: someMessageIdInTopic));
+  }
+
+  if (optionButtons.isEmpty) {
+    // TODO(a11y): This case makes a no-op gesture handler; as a consequence,
+    //   we're presenting some UI (to people who use screen-reader software) as
+    //   though it offers a gesture interaction that it doesn't meaningfully
+    //   offer, which is confusing. The solution here is probably to remove this
+    //   is-empty case by having at least one button that's always present,
+    //   such as "copy link to topic".
+    return;
+  }
+
+  _showActionSheet(pageContext, optionButtons: optionButtons);
+}
+
+class UserTopicUpdateButton extends ActionSheetMenuItemButton {
+  const UserTopicUpdateButton({
+    super.key,
+    required this.currentVisibilityPolicy,
+    required this.newVisibilityPolicy,
+    required this.narrow,
+    required super.pageContext,
+  });
+
+  final UserTopicVisibilityPolicy currentVisibilityPolicy;
+  final UserTopicVisibilityPolicy newVisibilityPolicy;
+  final TopicNarrow narrow;
+
+  @override IconData get icon {
+    switch (newVisibilityPolicy) {
+      case UserTopicVisibilityPolicy.none:
+        return ZulipIcons.inherit;
+      case UserTopicVisibilityPolicy.muted:
+        return ZulipIcons.mute;
+      case UserTopicVisibilityPolicy.unmuted:
+        return ZulipIcons.unmute;
+      case UserTopicVisibilityPolicy.followed:
+        return ZulipIcons.follow;
+      case UserTopicVisibilityPolicy.unknown:
+        // TODO(#1074): This should be unreachable as we keep `unknown` out of
+        //   our data structures.
+        assert(false);
+        return ZulipIcons.inherit;
+    }
+  }
+
+  @override
+  String label(ZulipLocalizations zulipLocalizations) {
+    switch ((currentVisibilityPolicy, newVisibilityPolicy)) {
+      case (UserTopicVisibilityPolicy.muted, UserTopicVisibilityPolicy.none):
+        return zulipLocalizations.actionSheetOptionUnmuteTopic;
+      case (UserTopicVisibilityPolicy.followed, UserTopicVisibilityPolicy.none):
+        return zulipLocalizations.actionSheetOptionUnfollowTopic;
+
+      case (_, UserTopicVisibilityPolicy.muted):
+        return zulipLocalizations.actionSheetOptionMuteTopic;
+      case (_, UserTopicVisibilityPolicy.unmuted):
+        return zulipLocalizations.actionSheetOptionUnmuteTopic;
+      case (_, UserTopicVisibilityPolicy.followed):
+        return zulipLocalizations.actionSheetOptionFollowTopic;
+
+      case (_, UserTopicVisibilityPolicy.none):
+        // This is unexpected because `UserTopicVisibilityPolicy.muted` and
+        // `UserTopicVisibilityPolicy.followed` (handled in separate `case`'s)
+        // are the only expected `currentVisibilityPolicy`
+        // when `newVisibilityPolicy` is `UserTopicVisibilityPolicy.none`.
+        assert(false);
+        return '';
+
+      case (_, UserTopicVisibilityPolicy.unknown):
+        // This case is unreachable (or should be) because we keep `unknown` out
+        // of our data structures. We plan to remove the `unknown` case in #1074.
+        assert(false);
+        return '';
+    }
+  }
+
+  String _errorTitle(ZulipLocalizations zulipLocalizations) {
+    switch ((currentVisibilityPolicy, newVisibilityPolicy)) {
+      case (UserTopicVisibilityPolicy.muted, UserTopicVisibilityPolicy.none):
+        return zulipLocalizations.errorUnmuteTopicFailed;
+      case (UserTopicVisibilityPolicy.followed, UserTopicVisibilityPolicy.none):
+        return zulipLocalizations.errorUnfollowTopicFailed;
+
+      case (_, UserTopicVisibilityPolicy.muted):
+        return zulipLocalizations.errorMuteTopicFailed;
+      case (_, UserTopicVisibilityPolicy.unmuted):
+        return zulipLocalizations.errorUnmuteTopicFailed;
+      case (_, UserTopicVisibilityPolicy.followed):
+        return zulipLocalizations.errorFollowTopicFailed;
+
+      case (_, UserTopicVisibilityPolicy.none):
+        // This is unexpected because `UserTopicVisibilityPolicy.muted` and
+        // `UserTopicVisibilityPolicy.followed` (handled in separate `case`'s)
+        // are the only expected `currentVisibilityPolicy`
+        // when `newVisibilityPolicy` is `UserTopicVisibilityPolicy.none`.
+        assert(false);
+        return '';
+
+      case (_, UserTopicVisibilityPolicy.unknown):
+        // This case is unreachable (or should be) because we keep `unknown` out
+        // of our data structures. We plan to remove the `unknown` case in #1074.
+        assert(false);
+        return '';
+    }
+  }
+
+  @override void onPressed() async {
+    try {
+      await updateUserTopicCompat(
+        PerAccountStoreWidget.of(pageContext).connection,
+        streamId: narrow.streamId,
+        topic: narrow.topic,
+        visibilityPolicy: newVisibilityPolicy);
+    } catch (e) {
+      if (!pageContext.mounted) return;
+
+      String? errorMessage;
+
+      switch (e) {
+        case ZulipApiException():
+          errorMessage = e.message;
+          // TODO(#741) specific messages for common errors, like network errors
+          //   (support with reusable code)
+        default:
+      }
+
+      final zulipLocalizations = ZulipLocalizations.of(pageContext);
+      showErrorDialog(context: pageContext,
+        title: _errorTitle(zulipLocalizations), message: errorMessage);
+    }
+  }
+}
+
+class ResolveUnresolveButton extends ActionSheetMenuItemButton {
+  ResolveUnresolveButton({
+    super.key,
+    required this.topic,
+    required this.someMessageIdInTopic,
+    required super.pageContext,
+  }) : _actionIsResolve = !topic.isResolved;
+
+  /// The topic that the action sheet was opened for.
+  ///
+  /// There might not currently be any messages with this topic;
+  /// see dartdoc of [ActionSheetMenuItemButton].
+  final TopicName topic;
+
+  /// The message ID that was passed when opening the action sheet.
+  ///
+  /// The message with this ID might currently not exist,
+  /// or might exist with a different topic;
+  /// see dartdoc of [ActionSheetMenuItemButton].
+  final int someMessageIdInTopic;
+
+  final bool _actionIsResolve;
+
+  @override
+  IconData get icon => _actionIsResolve ? ZulipIcons.check : ZulipIcons.check_remove;
+
+  @override
+  String label(ZulipLocalizations zulipLocalizations) {
+    return _actionIsResolve
+      ? zulipLocalizations.actionSheetOptionResolveTopic
+      : zulipLocalizations.actionSheetOptionUnresolveTopic;
+  }
+
+  @override void onPressed() async {
+    final zulipLocalizations = ZulipLocalizations.of(pageContext);
+    final store = PerAccountStoreWidget.of(pageContext);
+
+    // We *could* check here if the topic has changed since the action sheet was
+    // opened (see dartdoc of [ActionSheetMenuItemButton]) and abort if so.
+    // We simplify by not doing so.
+    // There's already an inherent race that that check wouldn't help with:
+    // when you tap the button, an intervening topic change may already have
+    // happened, just not reached us in an event yet.
+    // Discussion, including about what web does:
+    //   https://github.com/zulip/zulip-flutter/pull/1301#discussion_r1936181560
+
+    try {
+      await updateMessage(store.connection,
+        messageId: someMessageIdInTopic,
+        topic: _actionIsResolve ? topic.resolve() : topic.unresolve(),
+        propagateMode: PropagateMode.changeAll,
+        sendNotificationToOldThread: false,
+        sendNotificationToNewThread: true,
+      );
+    } catch (e) {
+      if (!pageContext.mounted) return;
+
+      String? errorMessage;
+      switch (e) {
+        case ZulipApiException():
+          errorMessage = e.message;
+          // TODO(#741) specific messages for common errors, like network errors
+          //   (support with reusable code)
+        default:
+      }
+
+      final title = _actionIsResolve
+        ? zulipLocalizations.errorResolveTopicFailedTitle
+        : zulipLocalizations.errorUnresolveTopicFailedTitle;
+      showErrorDialog(context: pageContext, title: title, message: errorMessage);
+    }
+  }
+}
 
 /// Show a sheet of actions you can take on a message in the message list.
 ///
 /// Must have a [MessageListPage] ancestor.
 void showMessageActionSheet({required BuildContext context, required Message message}) {
+  final pageContext = PageRoot.contextOf(context);
+  final store = PerAccountStoreWidget.of(pageContext);
+
   // The UI that's conditioned on this won't live-update during this appearance
   // of the action sheet (we avoid calling composeBoxControllerOf in a build
-  // method; see its doc). But currently it will be constant through the life of
-  // any message list, so that's fine.
-  final isComposeBoxOffered = MessageListPage.composeBoxControllerOf(context) != null;
-  showDraggableScrollableModalBottomSheet(
-    context: context,
-    builder: (BuildContext _) {
-      return Column(children: [
-        ShareButton(message: message, messageListContext: context),
-        if (isComposeBoxOffered) QuoteAndReplyButton(
-          message: message,
-          messageListContext: context,
-        ),
-        CopyButton(message: message, messageListContext: context),
-      ]);
-    });
+  // method; see its doc).
+  // So we rely on the fact that isComposeBoxOffered for any given message list
+  // will be constant through the page's life.
+  final messageListPage = MessageListPage.ancestorOf(pageContext);
+  final isComposeBoxOffered = messageListPage.composeBoxController != null;
+
+  final isMessageRead = message.flags.contains(MessageFlag.read);
+  final markAsUnreadSupported = store.zulipFeatureLevel >= 155; // TODO(server-6)
+  final showMarkAsUnreadButton = markAsUnreadSupported && isMessageRead;
+
+  final optionButtons = [
+    ReactionButtons(message: message, pageContext: pageContext),
+    StarButton(message: message, pageContext: pageContext),
+    if (isComposeBoxOffered)
+      QuoteAndReplyButton(message: message, pageContext: pageContext),
+    if (showMarkAsUnreadButton)
+      MarkAsUnreadButton(message: message, pageContext: pageContext),
+    CopyMessageTextButton(message: message, pageContext: pageContext),
+    CopyMessageLinkButton(message: message, pageContext: pageContext),
+    ShareButton(message: message, pageContext: pageContext),
+  ];
+
+  _showActionSheet(pageContext, optionButtons: optionButtons);
 }
 
-abstract class MessageActionSheetMenuItemButton extends StatelessWidget {
+abstract class MessageActionSheetMenuItemButton extends ActionSheetMenuItemButton {
   MessageActionSheetMenuItemButton({
     super.key,
     required this.message,
-    required this.messageListContext,
-  }) : assert(messageListContext.findAncestorWidgetOfExactType<MessageListPage>() != null);
-
-  IconData get icon;
-  String label(ZulipLocalizations zulipLocalizations);
-  void Function(BuildContext) get onPressed;
+    required super.pageContext,
+  }) : assert(pageContext.findAncestorWidgetOfExactType<MessageListPage>() != null);
 
   final Message message;
-  final BuildContext messageListContext;
+}
+
+class ReactionButtons extends StatelessWidget {
+  const ReactionButtons({
+    super.key,
+    required this.message,
+    required this.pageContext,
+  });
+
+  final Message message;
+
+  /// A context within the [MessageListPage] this action sheet was
+  /// triggered from.
+  final BuildContext pageContext;
+
+  void _handleTapReaction({
+    required EmojiCandidate emoji,
+    required bool isSelfVoted,
+  }) {
+    // Dismiss the enclosing action sheet immediately,
+    // for swift UI feedback that the user's selection was received.
+    Navigator.pop(pageContext);
+
+    final zulipLocalizations = ZulipLocalizations.of(pageContext);
+    doAddOrRemoveReaction(
+      context: pageContext,
+      doRemoveReaction: isSelfVoted,
+      messageId: message.id,
+      emoji: emoji,
+      errorDialogTitle: isSelfVoted
+        ? zulipLocalizations.errorReactionRemovingFailedTitle
+        : zulipLocalizations.errorReactionAddingFailedTitle);
+  }
+
+  void _handleTapMore() {
+    // TODO(design): have emoji picker slide in from right and push
+    //   action sheet off to the left
+
+    // Dismiss current action sheet before opening emoji picker sheet.
+    Navigator.of(pageContext).pop();
+
+    showEmojiPickerSheet(pageContext: pageContext, message: message);
+  }
+
+  Widget _buildButton({
+    required BuildContext context,
+    required EmojiCandidate emoji,
+    required bool isSelfVoted,
+    required bool isFirst,
+  }) {
+    final designVariables = DesignVariables.of(context);
+    return Flexible(child: InkWell(
+      onTap: () => _handleTapReaction(emoji: emoji, isSelfVoted: isSelfVoted),
+      splashFactory: NoSplash.splashFactory,
+      borderRadius: isFirst
+        ? const BorderRadius.only(topLeft: Radius.circular(7))
+        : null,
+      overlayColor: WidgetStateColor.resolveWith((states) =>
+        states.any((e) => e == WidgetState.pressed)
+          ? designVariables.contextMenuItemBg.withFadedAlpha(0.20)
+          : Colors.transparent),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 5),
+        alignment: Alignment.center,
+        color: isSelfVoted
+          ? designVariables.contextMenuItemBg.withFadedAlpha(0.20)
+          : null,
+        child: UnicodeEmojiWidget(
+          emojiDisplay: emoji.emojiDisplay as UnicodeEmojiDisplay,
+          notoColorEmojiTextSize: 20.1,
+          size: 24))));
+  }
 
   @override
   Widget build(BuildContext context) {
+    assert(EmojiStore.popularEmojiCandidates.every(
+      (emoji) => emoji.emojiType == ReactionType.unicodeEmoji));
+
     final zulipLocalizations = ZulipLocalizations.of(context);
-    return MenuItemButton(
-      leadingIcon: Icon(icon),
-      onPressed: () => onPressed(context),
-      child: Text(label(zulipLocalizations)));
+    final store = PerAccountStoreWidget.of(pageContext);
+    final designVariables = DesignVariables.of(context);
+
+    bool hasSelfVote(EmojiCandidate emoji) {
+      return message.reactions?.aggregated.any((reactionWithVotes) {
+        return reactionWithVotes.reactionType == ReactionType.unicodeEmoji
+          && reactionWithVotes.emojiCode == emoji.emojiCode
+          && reactionWithVotes.userIds.contains(store.selfUserId);
+      }) ?? false;
+    }
+
+    return Container(
+      decoration: BoxDecoration(
+        color: designVariables.contextMenuItemBg.withFadedAlpha(0.12)),
+      child: Row(children: [
+        Flexible(child: Row(spacing: 1, children: List.unmodifiable(
+          EmojiStore.popularEmojiCandidates.mapIndexed((index, emoji) =>
+            _buildButton(
+              context: context,
+              emoji: emoji,
+              isSelfVoted: hasSelfVote(emoji),
+              isFirst: index == 0))))),
+        InkWell(
+          onTap: _handleTapMore,
+          splashFactory: NoSplash.splashFactory,
+          borderRadius: const BorderRadius.only(topRight: Radius.circular(7)),
+          overlayColor: WidgetStateColor.resolveWith((states) =>
+            states.any((e) => e == WidgetState.pressed)
+              ? designVariables.contextMenuItemBg.withFadedAlpha(0.20)
+              : Colors.transparent),
+          child: Padding(
+            padding: const EdgeInsetsDirectional.fromSTEB(12, 12, 4, 12),
+            child: Row(children: [
+              Text(zulipLocalizations.emojiReactionsMore,
+                textAlign: TextAlign.end,
+                style: TextStyle(
+                  color: designVariables.contextMenuItemText,
+                  fontSize: 14,
+                ).merge(weightVariableTextStyle(context, wght: 600))),
+              Icon(ZulipIcons.chevron_right,
+                color: designVariables.contextMenuItemText,
+                size: 24),
+            ]),
+          )),
+      ]),
+    );
   }
 }
 
-class ShareButton extends MessageActionSheetMenuItemButton {
-  ShareButton({
-    super.key,
-    required super.message,
-    required super.messageListContext,
-  });
+class StarButton extends MessageActionSheetMenuItemButton {
+  StarButton({super.key, required super.message, required super.pageContext});
 
-  @override get icon => Icons.adaptive.share;
+  @override IconData get icon => _isStarred ? ZulipIcons.star_filled : ZulipIcons.star;
+
+  bool get _isStarred => message.flags.contains(MessageFlag.starred);
 
   @override
   String label(ZulipLocalizations zulipLocalizations) {
-    return zulipLocalizations.actionSheetOptionShare;
+    return _isStarred
+      ? zulipLocalizations.actionSheetOptionUnstarMessage
+      : zulipLocalizations.actionSheetOptionStarMessage;
   }
 
-  @override get onPressed => (BuildContext context) async {
-    // Close the message action sheet; we're about to show the share
-    // sheet. (We could do this after the sharing Future settles, but
-    // on iOS I get impatient with how slowly our action sheet
-    // dismisses in that case.)
-    // TODO(#24): Fix iOS bug where this call causes the keyboard to
-    //   reopen (if it was open at the time of this
-    //   `showMessageActionSheet` call) and cover a large part of the
-    //   share sheet.
-    Navigator.of(context).pop();
+  @override void onPressed() async {
+    final zulipLocalizations = ZulipLocalizations.of(pageContext);
+    final op = message.flags.contains(MessageFlag.starred)
+      ? UpdateMessageFlagsOp.remove
+      : UpdateMessageFlagsOp.add;
 
-    // TODO: to support iPads, we're asked to give a
-    //   `sharePositionOrigin` param, or risk crashing / hanging:
-    //     https://pub.dev/packages/share_plus#ipad
-    //   Perhaps a wart in the API; discussion:
-    //     https://github.com/zulip/zulip-flutter/pull/12#discussion_r1130146231
-    // TODO: Share raw Markdown, not HTML
-    await Share.shareWithResult(message.content);
-  };
+    try {
+      final connection = PerAccountStoreWidget.of(pageContext).connection;
+      await updateMessageFlags(connection, messages: [message.id],
+        op: op, flag: MessageFlag.starred);
+    } catch (e) {
+      if (!pageContext.mounted) return;
+
+      String? errorMessage;
+      switch (e) {
+        case ZulipApiException():
+          errorMessage = e.message;
+          // TODO specific messages for common errors, like network errors
+          //   (support with reusable code)
+        default:
+      }
+
+      showErrorDialog(context: pageContext,
+        title: switch(op) {
+          UpdateMessageFlagsOp.remove => zulipLocalizations.errorUnstarMessageFailedTitle,
+          UpdateMessageFlagsOp.add    => zulipLocalizations.errorStarMessageFailedTitle,
+        }, message: errorMessage);
+    }
+  }
 }
 
 /// Fetch and return the raw Markdown content for [messageId],
@@ -136,7 +718,7 @@ Future<String?> fetchRawContentWithFeedback({
       // TODO(?) give no feedback on error conditions we expect to
       //   flag centrally in event polling, like invalid auth,
       //   user/realm deactivated. (Support with reusable code.)
-      await showErrorDialog(context: context,
+      showErrorDialog(context: context,
         title: errorDialogTitle, message: errorMessage);
     }
 
@@ -144,99 +726,192 @@ Future<String?> fetchRawContentWithFeedback({
 }
 
 class QuoteAndReplyButton extends MessageActionSheetMenuItemButton {
-  QuoteAndReplyButton({
-    super.key,
-    required super.message,
-    required super.messageListContext,
-  });
+  QuoteAndReplyButton({super.key, required super.message, required super.pageContext});
 
-  @override get icon => Icons.format_quote_outlined;
+  @override IconData get icon => ZulipIcons.format_quote;
 
   @override
   String label(ZulipLocalizations zulipLocalizations) {
     return zulipLocalizations.actionSheetOptionQuoteAndReply;
   }
 
-  @override get onPressed => (BuildContext bottomSheetContext) async {
-    // Close the message action sheet. We'll show the request progress
-    // in the compose-box content input with a "[Quoting…]" placeholder.
-    Navigator.of(bottomSheetContext).pop();
-    final zulipLocalizations = ZulipLocalizations.of(messageListContext);
+  @override void onPressed() async {
+    final zulipLocalizations = ZulipLocalizations.of(pageContext);
+    final message = this.message;
 
-    // This will be null only if the compose box disappeared after the
-    // message action sheet opened, and before "Quote and reply" was pressed.
-    // Currently a compose box can't ever disappear, so this is impossible.
-    ComposeBoxController composeBoxController =
-      MessageListPage.composeBoxControllerOf(messageListContext)!;
-    final topicController = composeBoxController.topicController;
+    var composeBoxController = findMessageListPage().composeBoxController;
+    // The compose box doesn't null out its controller; it's either always null
+    // (e.g. in Combined Feed) or always non-null; it can't have been nulled out
+    // after the action sheet opened.
+    composeBoxController!;
     if (
-      topicController != null
-      && topicController.textNormalized == kNoTopicTopic
+      composeBoxController is StreamComposeBoxController
+      && composeBoxController.topic.textNormalized == kNoTopicTopic
       && message is StreamMessage
     ) {
-      topicController.value = TextEditingValue(text: message.subject);
+      composeBoxController.topic.setTopic(message.topic);
     }
-    final tag = composeBoxController.contentController
-      .registerQuoteAndReplyStart(PerAccountStoreWidget.of(messageListContext),
+
+    // This inserts a "[Quoting…]" placeholder into the content input,
+    // giving the user a form of progress feedback.
+    final tag = composeBoxController.content
+      .registerQuoteAndReplyStart(
+        zulipLocalizations,
+        PerAccountStoreWidget.of(pageContext),
         message: message,
       );
 
     final rawContent = await fetchRawContentWithFeedback(
-      context: messageListContext,
+      context: pageContext,
       messageId: message.id,
       errorDialogTitle: zulipLocalizations.errorQuotationFailed,
     );
 
-    if (!messageListContext.mounted) return;
+    if (!pageContext.mounted) return;
 
-    // This will be null only if the compose box disappeared during the
-    // quotation request. Currently a compose box can't ever disappear,
-    // so this is impossible.
-    composeBoxController = MessageListPage.composeBoxControllerOf(messageListContext)!;
-    composeBoxController.contentController
-      .registerQuoteAndReplyEnd(PerAccountStoreWidget.of(messageListContext), tag,
+    composeBoxController = findMessageListPage().composeBoxController;
+    // The compose box doesn't null out its controller; it's either always null
+    // (e.g. in Combined Feed) or always non-null; it can't have been nulled out
+    // during the raw-content request.
+    composeBoxController!.content
+      .registerQuoteAndReplyEnd(PerAccountStoreWidget.of(pageContext), tag,
         message: message,
         rawContent: rawContent,
       );
     if (!composeBoxController.contentFocusNode.hasFocus) {
       composeBoxController.contentFocusNode.requestFocus();
     }
-  };
+  }
 }
 
-class CopyButton extends MessageActionSheetMenuItemButton {
-  CopyButton({
-    super.key,
-    required super.message,
-    required super.messageListContext,
-  });
+class MarkAsUnreadButton extends MessageActionSheetMenuItemButton {
+  MarkAsUnreadButton({super.key, required super.message, required super.pageContext});
 
-  @override get icon => Icons.copy;
+  @override IconData get icon => Icons.mark_chat_unread_outlined;
 
   @override
   String label(ZulipLocalizations zulipLocalizations) {
-    return zulipLocalizations.actionSheetOptionCopy;
+    return zulipLocalizations.actionSheetOptionMarkAsUnread;
   }
 
-  @override get onPressed => (BuildContext context) async {
-    // Close the message action sheet. We won't be showing request progress,
-    // but hopefully it won't take long at all, and
+  @override void onPressed() async {
+    final narrow = findMessageListPage().narrow;
+    unawaited(ZulipAction.markNarrowAsUnreadFromMessage(pageContext,
+      message, narrow));
+  }
+}
+
+class CopyMessageTextButton extends MessageActionSheetMenuItemButton {
+  CopyMessageTextButton({super.key, required super.message, required super.pageContext});
+
+  @override IconData get icon => ZulipIcons.copy;
+
+  @override
+  String label(ZulipLocalizations zulipLocalizations) {
+    return zulipLocalizations.actionSheetOptionCopyMessageText;
+  }
+
+  @override void onPressed() async {
+    // This action doesn't show request progress.
+    // But hopefully it won't take long at all; and
     // fetchRawContentWithFeedback has a TODO for giving feedback if it does.
-    Navigator.of(context).pop();
-    final zulipLocalizations = ZulipLocalizations.of(messageListContext);
+
+    final zulipLocalizations = ZulipLocalizations.of(pageContext);
 
     final rawContent = await fetchRawContentWithFeedback(
-      context: messageListContext,
+      context: pageContext,
       messageId: message.id,
       errorDialogTitle: zulipLocalizations.errorCopyingFailed,
     );
 
     if (rawContent == null) return;
 
-    if (!messageListContext.mounted) return;
+    if (!pageContext.mounted) return;
 
-    copyWithPopup(context: context,
-      successContent: Text(zulipLocalizations.successMessageCopied),
+    copyWithPopup(context: pageContext,
+      successContent: Text(zulipLocalizations.successMessageTextCopied),
       data: ClipboardData(text: rawContent));
-  };
+  }
+}
+
+class CopyMessageLinkButton extends MessageActionSheetMenuItemButton {
+  CopyMessageLinkButton({super.key, required super.message, required super.pageContext});
+
+  @override IconData get icon => Icons.link;
+
+  @override
+  String label(ZulipLocalizations zulipLocalizations) {
+    return zulipLocalizations.actionSheetOptionCopyMessageLink;
+  }
+
+  @override void onPressed() {
+    final zulipLocalizations = ZulipLocalizations.of(pageContext);
+
+    final store = PerAccountStoreWidget.of(pageContext);
+    final messageLink = narrowLink(
+      store,
+      SendableNarrow.ofMessage(message, selfUserId: store.selfUserId),
+      nearMessageId: message.id,
+    );
+
+    copyWithPopup(context: pageContext,
+      successContent: Text(zulipLocalizations.successMessageLinkCopied),
+      data: ClipboardData(text: messageLink.toString()));
+  }
+}
+
+class ShareButton extends MessageActionSheetMenuItemButton {
+  ShareButton({super.key, required super.message, required super.pageContext});
+
+  @override
+  IconData get icon => defaultTargetPlatform == TargetPlatform.iOS
+    ? ZulipIcons.share_ios
+    : ZulipIcons.share;
+
+  @override
+  String label(ZulipLocalizations zulipLocalizations) {
+    return zulipLocalizations.actionSheetOptionShare;
+  }
+
+  @override void onPressed() async {
+    // TODO(#591): Fix iOS bug where if the keyboard was open before the call
+    //   to `showMessageActionSheet`, it reappears briefly between
+    //   the `pop` of the action sheet and the appearance of the share sheet.
+    //
+    //   (Alternatively we could delay the [NavigatorState.pop] that
+    //   dismisses the action sheet until after the sharing Future settles
+    //   with [ShareResultStatus.success].  But on iOS one gets impatient with
+    //   how slowly our action sheet dismisses in that case.)
+
+    final zulipLocalizations = ZulipLocalizations.of(pageContext);
+
+    final rawContent = await fetchRawContentWithFeedback(
+      context: pageContext,
+      messageId: message.id,
+      errorDialogTitle: zulipLocalizations.errorSharingFailed,
+    );
+
+    if (rawContent == null) return;
+
+    if (!pageContext.mounted) return;
+
+    // TODO: to support iPads, we're asked to give a
+    //   `sharePositionOrigin` param, or risk crashing / hanging:
+    //     https://pub.dev/packages/share_plus#ipad
+    //   Perhaps a wart in the API; discussion:
+    //     https://github.com/zulip/zulip-flutter/pull/12#discussion_r1130146231
+    final result = await Share.share(rawContent);
+
+    switch (result.status) {
+      // The plugin isn't very helpful: "The status can not be determined".
+      // Until we learn otherwise, assume something wrong happened.
+      case ShareResultStatus.unavailable:
+        if (!pageContext.mounted) return;
+        showErrorDialog(context: pageContext,
+          title: zulipLocalizations.errorSharingFailed);
+      case ShareResultStatus.success:
+      case ShareResultStatus.dismissed:
+        // nothing to do
+    }
+  }
 }

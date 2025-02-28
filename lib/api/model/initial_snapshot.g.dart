@@ -11,8 +11,8 @@ part of 'initial_snapshot.dart';
 InitialSnapshot _$InitialSnapshotFromJson(Map<String, dynamic> json) =>
     InitialSnapshot(
       queueId: json['queue_id'] as String?,
-      lastEventId: json['last_event_id'] as int,
-      zulipFeatureLevel: json['zulip_feature_level'] as int,
+      lastEventId: (json['last_event_id'] as num).toInt(),
+      zulipFeatureLevel: (json['zulip_feature_level'] as num).toInt(),
       zulipVersion: json['zulip_version'] as String,
       zulipMergeBase: json['zulip_merge_base'] as String?,
       alertWords: (json['alert_words'] as List<dynamic>)
@@ -21,6 +21,24 @@ InitialSnapshot _$InitialSnapshotFromJson(Map<String, dynamic> json) =>
       customProfileFields: (json['custom_profile_fields'] as List<dynamic>)
           .map((e) => CustomProfileField.fromJson(e as Map<String, dynamic>))
           .toList(),
+      emailAddressVisibility: $enumDecodeNullable(
+          _$EmailAddressVisibilityEnumMap, json['email_address_visibility']),
+      serverTypingStartedExpiryPeriodMilliseconds:
+          (json['server_typing_started_expiry_period_milliseconds'] as num?)
+                  ?.toInt() ??
+              15000,
+      serverTypingStoppedWaitPeriodMilliseconds:
+          (json['server_typing_stopped_wait_period_milliseconds'] as num?)
+                  ?.toInt() ??
+              5000,
+      serverTypingStartedWaitPeriodMilliseconds:
+          (json['server_typing_started_wait_period_milliseconds'] as num?)
+                  ?.toInt() ??
+              10000,
+      realmEmoji: (json['realm_emoji'] as Map<String, dynamic>).map(
+        (k, e) =>
+            MapEntry(k, RealmEmojiItem.fromJson(e as Map<String, dynamic>)),
+      ),
       recentPrivateConversations: (json['recent_private_conversations']
               as List<dynamic>)
           .map((e) => RecentDmConversation.fromJson(e as Map<String, dynamic>))
@@ -37,12 +55,24 @@ InitialSnapshot _$InitialSnapshotFromJson(Map<String, dynamic> json) =>
           ? null
           : UserSettings.fromJson(
               json['user_settings'] as Map<String, dynamic>),
+      userTopics: (json['user_topics'] as List<dynamic>?)
+          ?.map((e) => UserTopicItem.fromJson(e as Map<String, dynamic>))
+          .toList(),
+      realmWildcardMentionPolicy: $enumDecode(
+          _$RealmWildcardMentionPolicyEnumMap,
+          json['realm_wildcard_mention_policy']),
+      realmMandatoryTopics: json['realm_mandatory_topics'] as bool,
+      realmWaitingPeriodThreshold:
+          (json['realm_waiting_period_threshold'] as num).toInt(),
       realmDefaultExternalAccounts:
           (json['realm_default_external_accounts'] as Map<String, dynamic>).map(
         (k, e) => MapEntry(
             k, RealmDefaultExternalAccount.fromJson(e as Map<String, dynamic>)),
       ),
-      maxFileUploadSizeMib: json['max_file_upload_size_mib'] as int,
+      maxFileUploadSizeMib: (json['max_file_upload_size_mib'] as num).toInt(),
+      serverEmojiDataUrl: json['server_emoji_data_url'] == null
+          ? null
+          : Uri.parse(json['server_emoji_data_url'] as String),
       realmUsers:
           (InitialSnapshot._readUsersIsActiveFallbackTrue(json, 'realm_users')
                   as List<dynamic>)
@@ -67,17 +97,48 @@ Map<String, dynamic> _$InitialSnapshotToJson(InitialSnapshot instance) =>
       'zulip_merge_base': instance.zulipMergeBase,
       'alert_words': instance.alertWords,
       'custom_profile_fields': instance.customProfileFields,
+      'email_address_visibility':
+          _$EmailAddressVisibilityEnumMap[instance.emailAddressVisibility],
+      'server_typing_started_expiry_period_milliseconds':
+          instance.serverTypingStartedExpiryPeriodMilliseconds,
+      'server_typing_stopped_wait_period_milliseconds':
+          instance.serverTypingStoppedWaitPeriodMilliseconds,
+      'server_typing_started_wait_period_milliseconds':
+          instance.serverTypingStartedWaitPeriodMilliseconds,
+      'realm_emoji': instance.realmEmoji,
       'recent_private_conversations': instance.recentPrivateConversations,
       'subscriptions': instance.subscriptions,
       'unread_msgs': instance.unreadMsgs,
       'streams': instance.streams,
       'user_settings': instance.userSettings,
+      'user_topics': instance.userTopics,
+      'realm_wildcard_mention_policy': instance.realmWildcardMentionPolicy,
+      'realm_mandatory_topics': instance.realmMandatoryTopics,
+      'realm_waiting_period_threshold': instance.realmWaitingPeriodThreshold,
       'realm_default_external_accounts': instance.realmDefaultExternalAccounts,
       'max_file_upload_size_mib': instance.maxFileUploadSizeMib,
+      'server_emoji_data_url': instance.serverEmojiDataUrl?.toString(),
       'realm_users': instance.realmUsers,
       'realm_non_active_users': instance.realmNonActiveUsers,
       'cross_realm_bots': instance.crossRealmBots,
     };
+
+const _$EmailAddressVisibilityEnumMap = {
+  EmailAddressVisibility.everyone: 1,
+  EmailAddressVisibility.members: 2,
+  EmailAddressVisibility.admins: 3,
+  EmailAddressVisibility.nobody: 4,
+  EmailAddressVisibility.moderators: 5,
+};
+
+const _$RealmWildcardMentionPolicyEnumMap = {
+  RealmWildcardMentionPolicy.everyone: 1,
+  RealmWildcardMentionPolicy.members: 2,
+  RealmWildcardMentionPolicy.fullMembers: 3,
+  RealmWildcardMentionPolicy.admins: 5,
+  RealmWildcardMentionPolicy.nobody: 6,
+  RealmWildcardMentionPolicy.moderators: 7,
+};
 
 RealmDefaultExternalAccount _$RealmDefaultExternalAccountFromJson(
         Map<String, dynamic> json) =>
@@ -100,9 +161,10 @@ Map<String, dynamic> _$RealmDefaultExternalAccountToJson(
 RecentDmConversation _$RecentDmConversationFromJson(
         Map<String, dynamic> json) =>
     RecentDmConversation(
-      maxMessageId: json['max_message_id'] as int,
-      userIds:
-          (json['user_ids'] as List<dynamic>).map((e) => e as int).toList(),
+      maxMessageId: (json['max_message_id'] as num).toInt(),
+      userIds: (json['user_ids'] as List<dynamic>)
+          .map((e) => (e as num).toInt())
+          .toList(),
     );
 
 Map<String, dynamic> _$RecentDmConversationToJson(
@@ -138,21 +200,48 @@ const _$EmojisetEnumMap = {
   Emojiset.text: 'text',
 };
 
+UserTopicItem _$UserTopicItemFromJson(Map<String, dynamic> json) =>
+    UserTopicItem(
+      streamId: (json['stream_id'] as num).toInt(),
+      topicName: TopicName.fromJson(json['topic_name'] as String),
+      lastUpdated: (json['last_updated'] as num).toInt(),
+      visibilityPolicy: $enumDecode(
+          _$UserTopicVisibilityPolicyEnumMap, json['visibility_policy'],
+          unknownValue: UserTopicVisibilityPolicy.unknown),
+    );
+
+Map<String, dynamic> _$UserTopicItemToJson(UserTopicItem instance) =>
+    <String, dynamic>{
+      'stream_id': instance.streamId,
+      'topic_name': instance.topicName,
+      'last_updated': instance.lastUpdated,
+      'visibility_policy': instance.visibilityPolicy,
+    };
+
+const _$UserTopicVisibilityPolicyEnumMap = {
+  UserTopicVisibilityPolicy.none: 0,
+  UserTopicVisibilityPolicy.muted: 1,
+  UserTopicVisibilityPolicy.unmuted: 2,
+  UserTopicVisibilityPolicy.followed: 3,
+  UserTopicVisibilityPolicy.unknown: null,
+};
+
 UnreadMessagesSnapshot _$UnreadMessagesSnapshotFromJson(
         Map<String, dynamic> json) =>
     UnreadMessagesSnapshot(
-      count: json['count'] as int,
+      count: (json['count'] as num).toInt(),
       dms: (json['pms'] as List<dynamic>)
           .map((e) => UnreadDmSnapshot.fromJson(e as Map<String, dynamic>))
           .toList(),
-      streams: (json['streams'] as List<dynamic>)
-          .map((e) => UnreadStreamSnapshot.fromJson(e as Map<String, dynamic>))
+      channels: (json['streams'] as List<dynamic>)
+          .map((e) => UnreadChannelSnapshot.fromJson(e as Map<String, dynamic>))
           .toList(),
       huddles: (json['huddles'] as List<dynamic>)
           .map((e) => UnreadHuddleSnapshot.fromJson(e as Map<String, dynamic>))
           .toList(),
-      mentions:
-          (json['mentions'] as List<dynamic>).map((e) => e as int).toList(),
+      mentions: (json['mentions'] as List<dynamic>)
+          .map((e) => (e as num).toInt())
+          .toList(),
       oldUnreadsMissing: json['old_unreads_missing'] as bool,
     );
 
@@ -161,7 +250,7 @@ Map<String, dynamic> _$UnreadMessagesSnapshotToJson(
     <String, dynamic>{
       'count': instance.count,
       'pms': instance.dms,
-      'streams': instance.streams,
+      'streams': instance.channels,
       'huddles': instance.huddles,
       'mentions': instance.mentions,
       'old_unreads_missing': instance.oldUnreadsMissing,
@@ -170,9 +259,10 @@ Map<String, dynamic> _$UnreadMessagesSnapshotToJson(
 UnreadDmSnapshot _$UnreadDmSnapshotFromJson(Map<String, dynamic> json) =>
     UnreadDmSnapshot(
       otherUserId:
-          UnreadDmSnapshot._readOtherUserId(json, 'other_user_id') as int,
+          (UnreadDmSnapshot._readOtherUserId(json, 'other_user_id') as num)
+              .toInt(),
       unreadMessageIds: (json['unread_message_ids'] as List<dynamic>)
-          .map((e) => e as int)
+          .map((e) => (e as num).toInt())
           .toList(),
     );
 
@@ -182,18 +272,18 @@ Map<String, dynamic> _$UnreadDmSnapshotToJson(UnreadDmSnapshot instance) =>
       'unread_message_ids': instance.unreadMessageIds,
     };
 
-UnreadStreamSnapshot _$UnreadStreamSnapshotFromJson(
+UnreadChannelSnapshot _$UnreadChannelSnapshotFromJson(
         Map<String, dynamic> json) =>
-    UnreadStreamSnapshot(
-      topic: json['topic'] as String,
-      streamId: json['stream_id'] as int,
+    UnreadChannelSnapshot(
+      topic: TopicName.fromJson(json['topic'] as String),
+      streamId: (json['stream_id'] as num).toInt(),
       unreadMessageIds: (json['unread_message_ids'] as List<dynamic>)
-          .map((e) => e as int)
+          .map((e) => (e as num).toInt())
           .toList(),
     );
 
-Map<String, dynamic> _$UnreadStreamSnapshotToJson(
-        UnreadStreamSnapshot instance) =>
+Map<String, dynamic> _$UnreadChannelSnapshotToJson(
+        UnreadChannelSnapshot instance) =>
     <String, dynamic>{
       'topic': instance.topic,
       'stream_id': instance.streamId,
@@ -205,7 +295,7 @@ UnreadHuddleSnapshot _$UnreadHuddleSnapshotFromJson(
     UnreadHuddleSnapshot(
       userIdsString: json['user_ids_string'] as String,
       unreadMessageIds: (json['unread_message_ids'] as List<dynamic>)
-          .map((e) => e as int)
+          .map((e) => (e as num).toInt())
           .toList(),
     );
 
@@ -215,9 +305,3 @@ Map<String, dynamic> _$UnreadHuddleSnapshotToJson(
       'user_ids_string': instance.userIdsString,
       'unread_message_ids': instance.unreadMessageIds,
     };
-
-const _$UserSettingNameEnumMap = {
-  UserSettingName.twentyFourHourTime: 'twenty_four_hour_time',
-  UserSettingName.displayEmojiReactionUsers: 'display_emoji_reaction_users',
-  UserSettingName.emojiset: 'emojiset',
-};

@@ -1,13 +1,22 @@
+import 'dart:async';
+
 import 'package:checks/checks.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_checks/flutter_checks.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:zulip/model/actions.dart';
 import 'package:zulip/model/store.dart';
+import 'package:zulip/widgets/app.dart';
+import 'package:zulip/widgets/inbox.dart';
+import 'package:zulip/widgets/page.dart';
 import 'package:zulip/widgets/store.dart';
 
 import '../flutter_checks.dart';
 import '../model/binding.dart';
 import '../example_data.dart' as eg;
 import '../model/store_checks.dart';
+import '../model/test_store.dart';
+import '../test_navigation.dart';
 
 /// A widget whose state uses [PerAccountStoreAwareStateMixin].
 class MyWidgetWithMixin extends StatefulWidget {
@@ -35,7 +44,7 @@ class MyWidgetWithMixinState extends State<MyWidgetWithMixin> with PerAccountSto
   @override
   Widget build(BuildContext context) {
     final brightness = Theme.of(context).brightness;
-    final accountId = PerAccountStoreWidget.of(context).account.id;
+    final accountId = PerAccountStoreWidget.of(context).accountId;
     return Text('brightness: $brightness; accountId: $accountId');
   }
 }
@@ -48,7 +57,7 @@ extension MyWidgetWithMixinStateChecks on Subject<MyWidgetWithMixinState> {
 void main() {
   TestZulipBinding.ensureInitialized();
 
-  testWidgets('GlobalStoreWidget', (WidgetTester tester) async {
+  testWidgets('GlobalStoreWidget', (tester) async {
     addTearDown(testBinding.reset);
 
     GlobalStore? globalStore;
@@ -87,12 +96,30 @@ void main() {
             child: Builder(
               builder: (context) {
                 final store = PerAccountStoreWidget.of(context);
-                return Text('found store, account: ${store.account.id}');
+                return Text('found store, account: ${store.accountId}');
               })))));
     await tester.pump();
     await tester.pump();
 
     tester.widget(find.text('found store, account: ${eg.selfAccount.id}'));
+  });
+
+  testWidgets('PerAccountStoreWidget.of detailed error', (tester) async {
+    addTearDown(testBinding.reset);
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: GlobalStoreWidget(
+          // no PerAccountStoreWidget
+          child: Builder(
+            builder: (context) {
+              final store = PerAccountStoreWidget.of(context);
+              return Text('found store, account: ${store.accountId}');
+            }))));
+    await tester.pump();
+    check(tester.takeException())
+      .has((x) => x.toString(), 'toString') // TODO(checks): what's a good convention for this?
+      .contains('consider MaterialAccountWidgetRoute');
   });
 
   testWidgets('PerAccountStoreWidget immediate data after first loaded', (tester) async {
@@ -109,7 +136,7 @@ void main() {
             child: Builder(
               builder: (context) {
                 final store = PerAccountStoreWidget.of(context);
-                return Text('found store, account: ${store.account.id}');
+                return Text('found store, account: ${store.accountId}');
               })))));
 
     // First, the global store has to load.
@@ -137,16 +164,81 @@ void main() {
             child: Builder(
               builder: (context) {
                 final store = PerAccountStoreWidget.of(context);
-                return Text('found store, account: ${store.account.id}');
+                return Text('found store, account: ${store.accountId}');
               })))));
 
     // (... even one that really is separate, with its own fresh state node ...)
     check(tester.state(find.byType(PerAccountStoreWidget)))
-      .not(it()..identicalTo(oldState));
+      .not((it) => it.identicalTo(oldState));
 
     // ... then its child appears immediately, without waiting to load.
     check(tester.any(find.textContaining('found store'))).isTrue();
     tester.widget(find.text('found store, account: ${eg.selfAccount.id}'));
+  });
+
+  testWidgets("PerAccountStoreWidget.routeToRemoveOnLogout logged-out account's routes removed from nav; other accounts' remain", (tester) async {
+    Future<void> makeUnreadTopicInInbox(int accountId, String topic) async {
+      final stream = eg.stream();
+      final message = eg.streamMessage(stream: stream, topic: topic);
+      final store = await testBinding.globalStore.perAccount(accountId);
+      await store.addStream(stream);
+      await store.addSubscription(eg.subscription(stream));
+      await store.addMessage(message);
+      await tester.pump();
+    }
+
+    addTearDown(testBinding.reset);
+
+    final account1 = eg.account(id: 1, user: eg.user());
+    final account2 = eg.account(id: 2, user: eg.user());
+    await testBinding.globalStore.add(account1, eg.initialSnapshot());
+    await testBinding.globalStore.add(account2, eg.initialSnapshot());
+
+    final testNavObserver = TestNavigatorObserver();
+    await tester.pumpWidget(ZulipApp(navigatorObservers: [testNavObserver]));
+    await tester.pump();
+    final navigator = await ZulipApp.navigator;
+    navigator.popUntil((_) => false); // clear starting routes
+    await tester.pumpAndSettle();
+
+    final pushedRoutes = <Route<dynamic>>[];
+    testNavObserver.onPushed = (route, prevRoute) => pushedRoutes.add(route);
+    // TODO: switch to a realistic setup:
+    //   https://github.com/zulip/zulip-flutter/pull/1076#discussion_r1874124363
+    final account1Route = MaterialAccountWidgetRoute(
+      accountId: account1.id, page: const InboxPageBody());
+    final account2Route = MaterialAccountWidgetRoute(
+      accountId: account2.id, page: const InboxPageBody());
+    unawaited(navigator.push(account1Route));
+    unawaited(navigator.push(account2Route));
+    await tester.pumpAndSettle();
+    check(pushedRoutes).deepEquals([account1Route, account2Route]);
+
+    await makeUnreadTopicInInbox(account1.id, 'topic in account1');
+    final findAccount1PageContent = find.text('topic in account1', skipOffstage: false);
+
+    await makeUnreadTopicInInbox(account2.id, 'topic in account2');
+    final findAccount2PageContent = find.text('topic in account2', skipOffstage: false);
+
+    final findLoadingPage = find.byType(LoadingPlaceholderPage, skipOffstage: false);
+
+    check(findAccount1PageContent).findsOne();
+    check(findLoadingPage).findsNothing();
+
+    final removedRoutes = <Route<dynamic>>[];
+    testNavObserver.onRemoved = (route, prevRoute) => removedRoutes.add(route);
+
+    final future = logOutAccount(testBinding.globalStore, account1.id);
+    await tester.pump(TestGlobalStore.removeAccountDuration);
+    await future;
+    check(removedRoutes).single.identicalTo(account1Route);
+    check(findAccount1PageContent).findsNothing();
+    check(findLoadingPage).findsOne();
+
+    await tester.pump();
+    check(findAccount1PageContent).findsNothing();
+    check(findLoadingPage).findsNothing();
+    check(findAccount2PageContent).findsOne();
   });
 
   testWidgets('PerAccountStoreAwareStateMixin', (tester) async {
@@ -156,6 +248,8 @@ void main() {
     await testBinding.globalStore.add(eg.selfAccount, eg.initialSnapshot());
 
     Future<void> pumpWithParams({required bool light, required int accountId}) async {
+      // TODO use [TestZulipApp]
+      //   (seeing some extraneous dep changes when trying that)
       await tester.pumpWidget(
         MaterialApp(
           theme: light ? ThemeData.light() : ThemeData.dark(),
