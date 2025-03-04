@@ -11,8 +11,14 @@ sealed class Narrow {
   /// This const constructor allows subclasses to have const constructors.
   const Narrow();
 
-  // TODO implement muting; will need containsMessage to take more params
-  //   This means stream muting, topic un/muting, and user muting.
+  /// Whether this message satisfies the filters of this narrow.
+  ///
+  /// This is true just when the server would be expected to include the message
+  /// in a [getMessages] request for this narrow, given appropriate anchor etc.
+  ///
+  /// This does not necessarily mean the message list would show this message
+  /// when navigated to this narrow; in particular it does not address the
+  /// question of whether the stream or topic, or the sending user, is muted.
   bool containsMessage(Message message);
 
   /// This narrow, expressed as an [ApiNarrow].
@@ -33,13 +39,12 @@ sealed class SendableNarrow extends Narrow {
   MessageDestination get destination;
 }
 
-/// The narrow called "All messages" in the UI.
+/// The narrow called "Combined feed" in the UI.
 ///
-/// This does not literally mean all messages, or even all messages
-/// that the user has access to: in particular it excludes muted streams
-/// and topics.
-class AllMessagesNarrow extends Narrow {
-  const AllMessagesNarrow();
+/// All messages the user has access to, excluding unsubscribed streams
+/// and muted streams and topics. See [PerAccountStore.isTopicVisible].
+class CombinedFeedNarrow extends Narrow {
+  const CombinedFeedNarrow();
 
   @override
   bool containsMessage(Message message) {
@@ -51,17 +56,17 @@ class AllMessagesNarrow extends Narrow {
 
   @override
   bool operator ==(Object other) {
-    if (other is! AllMessagesNarrow) return false;
+    if (other is! CombinedFeedNarrow) return false;
     // Conceptually there's only one value of this type.
     return true;
   }
 
   @override
-  int get hashCode => 'AllMessagesNarrow'.hashCode;
+  int get hashCode => 'CombinedFeedNarrow'.hashCode;
 }
 
-class StreamNarrow extends Narrow {
-  const StreamNarrow(this.streamId);
+class ChannelNarrow extends Narrow {
+  const ChannelNarrow(this.streamId);
 
   final int streamId;
 
@@ -74,51 +79,65 @@ class StreamNarrow extends Narrow {
   ApiNarrow apiEncode() => [ApiNarrowStream(streamId)];
 
   @override
-  String toString() => 'StreamNarrow($streamId)';
+  String toString() => 'ChannelNarrow($streamId)';
 
   @override
   bool operator ==(Object other) {
-    if (other is! StreamNarrow) return false;
+    if (other is! ChannelNarrow) return false;
     return other.streamId == streamId;
   }
 
   @override
-  int get hashCode => Object.hash('StreamNarrow', streamId);
+  int get hashCode => Object.hash('ChannelNarrow', streamId);
 }
 
 class TopicNarrow extends Narrow implements SendableNarrow {
-  const TopicNarrow(this.streamId, this.topic);
+  const TopicNarrow(this.streamId, this.topic, {this.with_});
 
   factory TopicNarrow.ofMessage(StreamMessage message) {
-    return TopicNarrow(message.streamId, message.subject);
+    return TopicNarrow(message.streamId, message.topic);
   }
 
   final int streamId;
-  final String topic;
+  final TopicName topic;
+  final int? with_;
+
+  TopicNarrow sansWith() => TopicNarrow(streamId, topic);
 
   @override
   bool containsMessage(Message message) {
     return (message is StreamMessage
-      && message.streamId == streamId && message.subject == topic);
+      && message.streamId == streamId && message.topic == topic);
   }
 
   @override
-  ApiNarrow apiEncode() => [ApiNarrowStream(streamId), ApiNarrowTopic(topic)];
+  ApiNarrow apiEncode() => [
+    ApiNarrowStream(streamId),
+    ApiNarrowTopic(topic),
+    if (with_ != null) ApiNarrowWith(with_!),
+  ];
 
   @override
   StreamDestination get destination => StreamDestination(streamId, topic);
 
   @override
-  String toString() => 'TopicNarrow($streamId, $topic)';
+  String toString() {
+    final fields = [
+      streamId.toString(),
+      topic.displayName,
+      if (with_ != null) 'with: ${with_!}',
+    ];
+    return 'TopicNarrow(${fields.join(', ')})';
+  }
 
   @override
   bool operator ==(Object other) {
     if (other is! TopicNarrow) return false;
-    return other.streamId == streamId && other.topic == topic;
+    return other.streamId == streamId && other.topic == topic && other.with_ == with_;
   }
 
   @override
-  int get hashCode => Object.hash('TopicNarrow', streamId, topic);
+  int get hashCode => Object.hash('TopicNarrow', streamId, topic, with_);
 }
 
 /// The narrow for a direct-message conversation.
@@ -127,18 +146,47 @@ class TopicNarrow extends Narrow implements SendableNarrow {
 // Please add more constructors and getters here to handle any of those
 // as we turn out to need them.
 class DmNarrow extends Narrow implements SendableNarrow {
+  /// Construct a [DmNarrow] directly from its representation.
+  ///
+  /// The user IDs in `allRecipientIds` must be distinct and sorted,
+  /// and must include `selfUserId`.
+  ///
+  /// For consuming data that follows a different convention,
+  /// see other constructors.
   DmNarrow({required this.allRecipientIds, required int selfUserId})
     : assert(isSortedWithoutDuplicates(allRecipientIds)),
       assert(allRecipientIds.contains(selfUserId)),
       _selfUserId = selfUserId;
 
-  factory DmNarrow.withUser(int userId, {required int selfUserId}) {
-    return DmNarrow(
-      allRecipientIds: {userId, selfUserId}.toList()..sort(),
-      selfUserId: selfUserId,
-    );
+  /// A [DmNarrow] for self plus the given zero-or-more other users.
+  ///
+  /// The user IDs in `otherRecipientIds` must all be distinct from
+  /// each other and from `selfUserId`.  They need not be sorted.
+  ///
+  /// See also:
+  ///  * the plain [DmNarrow] constructor, given a list that includes self.
+  ///  * [DmNarrow.withUsers], given a list that may or may not include self.
+  factory DmNarrow.withOtherUsers(Iterable<int> otherRecipientIds,
+      {required int selfUserId}) {
+    return DmNarrow(selfUserId: selfUserId,
+      allRecipientIds: [...otherRecipientIds, selfUserId]..sort());
   }
 
+  /// A [DmNarrow] for a 1:1 DM conversation, either with self or otherwise.
+  factory DmNarrow.withUser(int userId, {required int selfUserId}) {
+    return DmNarrow(selfUserId: selfUserId,
+      allRecipientIds: (userId == selfUserId)  ? [selfUserId]
+                       : (userId < selfUserId) ? [userId, selfUserId]
+                       :                         [selfUserId, userId]);
+  }
+
+  /// A [DmNarrow] from a list of users which may or may not include self
+  /// and may or may not be sorted.
+  ///
+  /// Use this only when the input format is actually permitted both to
+  /// include and to exclude the self user.  When the list is known to be
+  /// one or the other, using the plain [DmNarrow] constructor
+  /// or [DmNarrow.withOtherUsers] respectively will be more efficient.
   factory DmNarrow.withUsers(List<int> userIds, {required int selfUserId}) {
     return DmNarrow(
       allRecipientIds: {...userIds, selfUserId}.toList()..sort(),
@@ -155,10 +203,7 @@ class DmNarrow extends Narrow implements SendableNarrow {
 
   /// A [DmNarrow] from an item in [InitialSnapshot.recentPrivateConversations].
   factory DmNarrow.ofRecentDmConversation(RecentDmConversation conversation, {required int selfUserId}) {
-    return DmNarrow(
-      allRecipientIds: [...conversation.userIds, selfUserId]..sort(),
-      selfUserId: selfUserId,
-    );
+    return DmNarrow.withOtherUsers(conversation.userIds, selfUserId: selfUserId);
   }
 
   /// A [DmNarrow] from an [UnreadHuddleSnapshot].
@@ -173,9 +218,8 @@ class DmNarrow extends Narrow implements SendableNarrow {
     UpdateMessageFlagsMessageDetail detail, {
     required int selfUserId,
   }) {
-    assert(detail.type == MessageType.private);
-    return DmNarrow(selfUserId: selfUserId,
-      allRecipientIds: [...detail.userIds!, selfUserId]..sort());
+    assert(detail.type == MessageType.direct);
+    return DmNarrow.withOtherUsers(detail.userIds!, selfUserId: selfUserId);
   }
 
   /// The user IDs of everyone in the conversation, sorted.
@@ -256,4 +300,60 @@ class DmNarrow extends Narrow implements SendableNarrow {
   int get hashCode => Object.hash('DmNarrow', _key);
 }
 
-// TODO other narrow types: starred, mentioned; searches; arbitrary
+class MentionsNarrow extends Narrow {
+  const MentionsNarrow();
+
+  @override
+  bool containsMessage(Message message) {
+    return message.flags.any((flag) {
+      switch (flag) {
+        case MessageFlag.mentioned:
+        case MessageFlag.wildcardMentioned:
+          return true;
+
+        case MessageFlag.read:
+        case MessageFlag.starred:
+        case MessageFlag.collapsed:
+        case MessageFlag.hasAlertWord:
+        case MessageFlag.historical:
+        case MessageFlag.unknown:
+          return false;
+      }
+    });
+  }
+
+  @override
+  ApiNarrow apiEncode() => [ApiNarrowIs(IsOperand.mentioned)];
+
+  @override
+  bool operator ==(Object other) {
+    if (other is! MentionsNarrow) return false;
+    // Conceptually there's only one value of this type.
+    return true;
+  }
+
+  @override
+  int get hashCode => 'MentionsNarrow'.hashCode;
+}
+
+class StarredMessagesNarrow extends Narrow {
+  const StarredMessagesNarrow();
+
+  @override
+  ApiNarrow apiEncode() => [ApiNarrowIs(IsOperand.starred)];
+
+  @override
+  bool containsMessage(Message message) {
+    return message.flags.contains(MessageFlag.starred);
+  }
+
+  @override
+  bool operator ==(Object other) {
+    if (other is! StarredMessagesNarrow) return false;
+    // Conceptually there's only one value of this type.
+    return true;
+  }
+
+  @override
+  int get hashCode => 'StarredMessagesNarrow'.hashCode;
+}

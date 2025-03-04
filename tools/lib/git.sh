@@ -4,6 +4,11 @@
 
 no_uncommitted_changes()
 {
+    # This line ensures the checks below are working from up-to-date data.
+    # Empirically it seems rarely if ever necessary on Linux,
+    # but does come up on macOS and Windows.
+    git update-index -q --refresh || return
+
     if ! git diff-index --quiet --cached HEAD -- "$@"; then
         # Index differs from HEAD.
         return 1
@@ -29,6 +34,7 @@ git_status_short()
     git status --short --untracked-files=normal -- "$@"
 }
 
+# shellcheck disable=SC2120  # parameters are all optional
 check_no_uncommitted_or_untracked()
 {
     local problem=""
@@ -83,4 +89,14 @@ git_base_commit() {
 # Arguments are passed through to `git diff`.
 git_changed_files() {
     git diff --name-only --diff-filter=d "$@"
+}
+
+# The root of the active Flutter tree.
+#
+# (This isn't strictly about Git, but in practice we use it
+# mainly for `git --git-dir`.)
+flutter_tree() {
+    local flutter_executable
+    flutter_executable=$(readlink -f "$(type -p flutter)")
+    echo "${flutter_executable%/bin/flutter}"
 }

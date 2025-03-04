@@ -1,17 +1,26 @@
-import 'package:flutter/material.dart';
-import 'package:flutter_gen/gen_l10n/zulip_localizations.dart';
+import 'dart:async';
 
-import '../api/core.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
+
 import '../api/exception.dart';
+import '../api/model/web_auth.dart';
 import '../api/route/account.dart';
 import '../api/route/realm.dart';
 import '../api/route/users.dart';
+import '../generated/l10n/zulip_localizations.dart';
+import '../log.dart';
+import '../model/binding.dart';
 import '../model/store.dart';
-import 'app.dart';
 import 'dialog.dart';
+import 'home.dart';
 import 'input.dart';
 import 'page.dart';
 import 'store.dart';
+import 'text.dart';
+import 'theme.dart';
 
 class _LoginSequenceRoute extends MaterialWidgetRoute<void> {
   _LoginSequenceRoute({
@@ -106,6 +115,20 @@ class AddAccountPage extends StatefulWidget {
     return _LoginSequenceRoute(page: const AddAccountPage());
   }
 
+  /// The hint text to show in the "Zulip server URL" input.
+  ///
+  /// If this contains an example value, it must be one that has been reserved
+  /// so that it cannot point to a real Zulip realm (nor any unknown other site).
+  /// The realm name `your-org` under zulipchat.com is reserved for this reason.
+  /// See discussion:
+  ///   https://chat.zulip.org/#narrow/channel/243-mobile-team/topic/flutter.3A.20login.20URL/near/1570347
+  // TODO(i18n): In principle this should be translated, because it's trying to
+  //   convey to the user the English phrase "your org".  But doing that is
+  //   tricky because of the need to have the example name reserved.
+  //   Realistically that probably means we'll only ever translate this for
+  //   at most a handful of languages, most likely none.
+  static const _serverUrlHint = 'your-org.zulipchat.com';
+
   @override
   State<AddAccountPage> createState() => _AddAccountPageState();
 }
@@ -116,7 +139,7 @@ class _AddAccountPageState extends State<AddAccountPage> {
   final ServerUrlTextEditingController _controller = ServerUrlTextEditingController();
   late ServerUrlParseResult _parseResult;
 
-  _serverUrlChanged() {
+  void _serverUrlChanged() {
     setState(() {
       _parseResult = _controller.tryParse();
     });
@@ -135,7 +158,7 @@ class _AddAccountPageState extends State<AddAccountPage> {
     super.dispose();
   }
 
-  Future<void> _onSubmitted(BuildContext context) async {
+  void _onSubmitted(BuildContext context) async {
     final zulipLocalizations = ZulipLocalizations.of(context);
     final url = _parseResult.url;
     final error = _parseResult.error;
@@ -153,7 +176,13 @@ class _AddAccountPageState extends State<AddAccountPage> {
     try {
       final GetServerSettingsResult serverSettings;
       try {
-        serverSettings = await getServerSettings(realmUrl: url!, zulipFeatureLevel: null);
+        final globalStore = GlobalStoreWidget.of(context);
+        final connection = globalStore.apiConnection(realmUrl: url!, zulipFeatureLevel: null);
+        try {
+          serverSettings = await getServerSettings(connection);
+        } finally {
+          connection.close();
+        }
       } catch (e) {
         if (!context.mounted) {
           return;
@@ -161,7 +190,7 @@ class _AddAccountPageState extends State<AddAccountPage> {
         // TODO(#105) give more helpful feedback; see `fetchServerSettings`
         //   in zulip-mobile's src/message/fetchActions.js.
         showErrorDialog(context: context,
-          title: zulipLocalizations.errorLoginCouldNotConnectTitle,
+          title: zulipLocalizations.errorCouldNotConnectTitle,
           message: zulipLocalizations.errorLoginCouldNotConnect(url.toString()));
         return;
       }
@@ -171,9 +200,8 @@ class _AddAccountPageState extends State<AddAccountPage> {
         return;
       }
 
-      // TODO(#36): support login methods beyond username/password
-      Navigator.push(context,
-        PasswordLoginPage.buildRoute(serverSettings: serverSettings));
+      unawaited(Navigator.push(context,
+        LoginPage.buildRoute(serverSettings: serverSettings)));
     } finally {
       setState(() {
         _inProgress = false;
@@ -216,10 +244,10 @@ class _AddAccountPageState extends State<AddAccountPage> {
                   // …but leave out unfocusing the input in case more editing is needed.
                 },
                 decoration: InputDecoration(
-                  labelText: zulipLocalizations.loginServerUrlInputLabel,
+                  labelText: zulipLocalizations.loginServerUrlLabel,
                   errorText: errorText,
                   helperText: kLayoutPinningHelperText,
-                  hintText: 'your-org.zulipchat.com')),
+                  hintText: AddAccountPage._serverUrlHint)),
               const SizedBox(height: 8),
               ElevatedButton(
                 onPressed: !_inProgress && errorText == null
@@ -230,21 +258,235 @@ class _AddAccountPageState extends State<AddAccountPage> {
   }
 }
 
-class PasswordLoginPage extends StatefulWidget {
-  const PasswordLoginPage({super.key, required this.serverSettings});
-
-  final GetServerSettingsResult serverSettings;
+class LoginPage extends StatefulWidget {
+  const LoginPage({super.key, required this.serverSettings});
 
   static Route<void> buildRoute({required GetServerSettingsResult serverSettings}) {
     return _LoginSequenceRoute(
-      page: PasswordLoginPage(serverSettings: serverSettings));
+      page: LoginPage(serverSettings: serverSettings, key: _lastBuiltKey));
+  }
+
+  final GetServerSettingsResult serverSettings;
+
+  /// Log in using the payload of a web-auth URL like zulip://login?…
+  static Future<void> handleWebAuthUrl(Uri url) async {
+    return _lastBuiltKey.currentState?.handleWebAuthUrl(url);
+  }
+
+  /// A key for the page from the last [buildRoute] call.
+  static final _lastBuiltKey = GlobalKey<_LoginPageState>();
+
+  /// The OTP to use, instead of an app-generated one, for testing.
+  @visibleForTesting
+  static String? debugOtpOverride;
+
+  @override
+  State<LoginPage> createState() => _LoginPageState();
+}
+
+class _LoginPageState extends State<LoginPage> {
+  bool _inProgress = false;
+
+  String? get _otp {
+    String? result;
+    assert(() {
+      result = LoginPage.debugOtpOverride;
+      return true;
+    }());
+    return result ?? __otp;
+  }
+  String? __otp;
+
+  Future<void> handleWebAuthUrl(Uri url) async {
+    setState(() {
+      _inProgress = true;
+    });
+    try {
+      await ZulipBinding.instance.closeInAppWebView();
+
+      if (_otp == null) throw Error();
+      final payload = WebAuthPayload.parse(url);
+      if (payload.realm.origin != widget.serverSettings.realmUrl.origin) throw Error();
+      final apiKey = payload.decodeApiKey(_otp!);
+      await _tryInsertAccountAndNavigate(
+        // TODO(server-5): Rely on userId from payload.
+        userId: payload.userId ?? await _getUserId(payload.email, apiKey),
+        email: payload.email,
+        apiKey: apiKey,
+      );
+    } catch (e) {
+      assert(debugLog(e.toString()));
+      if (!mounted) return;
+      final zulipLocalizations = ZulipLocalizations.of(context);
+
+      String message = zulipLocalizations.errorWebAuthOperationalError;
+      if (e is PlatformException && e.message != null) {
+        message = e.message!;
+      }
+      showErrorDialog(context: context,
+        title: zulipLocalizations.errorWebAuthOperationalErrorTitle,
+        message: message);
+    } finally {
+      setState(() {
+        _inProgress = false;
+        __otp = null;
+      });
+    }
+  }
+
+  Future<void> _beginWebAuth(ExternalAuthenticationMethod method) async {
+    __otp = generateOtp();
+    try {
+      final url = widget.serverSettings.realmUrl.resolve(method.loginUrl)
+        .replace(queryParameters: {'mobile_flow_otp': _otp!});
+
+      // Could set [_inProgress]… but we'd need to unset it if the web-auth
+      // attempt is aborted (by the user closing the browser, for example),
+      // and I don't think we can reliably know when that happens.
+      await ZulipBinding.instance.launchUrl(url, mode: LaunchMode.inAppBrowserView);
+    } catch (e) {
+      assert(debugLog(e.toString()));
+
+      if (e is PlatformException
+        && defaultTargetPlatform == TargetPlatform.iOS
+        && e.message != null && e.message!.startsWith('Error while launching')) {
+        // Ignore; I've seen this on my iPhone even when auth succeeds.
+        // Specifically, Apple web auth…which on iOS should be replaced by
+        // Apple native auth; that's #462.
+        // Possibly related:
+        //   https://github.com/flutter/flutter/issues/91660
+        // but in that issue, people report authentication not succeeding.
+        // TODO(#462) remove this?
+        return;
+      }
+
+      if (!mounted) return;
+      final zulipLocalizations = ZulipLocalizations.of(context);
+
+      String message = zulipLocalizations.errorWebAuthOperationalError;
+      if (e is PlatformException && e.message != null) {
+        message = e.message!;
+      }
+      showErrorDialog(context: context,
+        title: zulipLocalizations.errorWebAuthOperationalErrorTitle,
+        message: message);
+    }
+  }
+
+  Future<void> _tryInsertAccountAndNavigate({
+    required String email,
+    required String apiKey,
+    required int userId,
+  }) async {
+    final globalStore = GlobalStoreWidget.of(context);
+    final realmUrl = widget.serverSettings.realmUrl;
+    final int accountId;
+    try {
+      accountId = await globalStore.insertAccount(AccountsCompanion.insert(
+        realmUrl: realmUrl,
+        email: email,
+        apiKey: apiKey,
+        userId: userId,
+        zulipFeatureLevel: widget.serverSettings.zulipFeatureLevel,
+        zulipVersion: widget.serverSettings.zulipVersion,
+        zulipMergeBase: Value(widget.serverSettings.zulipMergeBase),
+      ));
+      // TODO give feedback to user on other SQL exceptions
+    } on AccountAlreadyExistsException {
+      if (!mounted) {
+        return;
+      }
+      final zulipLocalizations = ZulipLocalizations.of(context);
+      showErrorDialog(
+        context: context,
+        title: zulipLocalizations.errorAccountLoggedInTitle,
+        message: zulipLocalizations.errorAccountLoggedIn(
+          email, realmUrl.toString()));
+      return;
+    }
+
+    if (!mounted) {
+      return;
+    }
+
+    HomePage.navigate(context, accountId: accountId);
+  }
+
+  Future<int> _getUserId(String email, String apiKey) async {
+    final globalStore = GlobalStoreWidget.of(context);
+    final connection = globalStore.apiConnection(
+      realmUrl: widget.serverSettings.realmUrl,
+      zulipFeatureLevel: widget.serverSettings.zulipFeatureLevel,
+      email: email, apiKey: apiKey);
+    try {
+      return (await getOwnUser(connection)).userId;
+    } finally {
+      connection.close();
+    }
   }
 
   @override
-  State<PasswordLoginPage> createState() => _PasswordLoginPageState();
+  Widget build(BuildContext context) {
+    assert(!PerAccountStoreWidget.debugExistsOf(context));
+    final colorScheme = Theme.of(context).colorScheme;
+    final zulipLocalizations = ZulipLocalizations.of(context);
+
+    final externalAuthenticationMethods = widget.serverSettings.externalAuthenticationMethods;
+
+    final loginForm = Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+      _UsernamePasswordForm(loginPageState: this),
+      if (externalAuthenticationMethods.isNotEmpty) ...[
+        const OrDivider(),
+        ...externalAuthenticationMethods.map((method) {
+          final icon = method.displayIcon;
+          return OutlinedButton.icon(
+            style: ButtonStyle(
+              backgroundColor: WidgetStatePropertyAll(colorScheme.secondaryContainer),
+              foregroundColor: WidgetStatePropertyAll(colorScheme.onSecondaryContainer)),
+            icon: icon != null
+              ? Image.network(icon, width: 24, height: 24)
+              : null,
+            onPressed: !_inProgress
+              ? () => _beginWebAuth(method)
+              : null,
+            label: Text(
+              zulipLocalizations.signInWithFoo(method.displayName)));
+        }),
+      ],
+    ]);
+
+    return Scaffold(
+      appBar: AppBar(title: Text(zulipLocalizations.loginPageTitle),
+        bottom: _inProgress
+          ? const PreferredSize(preferredSize: Size.fromHeight(4),
+              child: LinearProgressIndicator(minHeight: 4)) // 4 restates default
+          : null),
+      body: SafeArea(
+        minimum: const EdgeInsets.symmetric(horizontal: 8),
+        bottom: false,
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.only(top: 8),
+            child: SafeArea(
+              minimum: const EdgeInsets.only(bottom: 8),
+              // TODO also detect vertical scroll gestures that start on the
+              //   left or the right of this box
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 400),
+                child: loginForm))))));
+  }
 }
 
-class _PasswordLoginPageState extends State<PasswordLoginPage> {
+class _UsernamePasswordForm extends StatefulWidget {
+  const _UsernamePasswordForm({required this.loginPageState});
+
+  final _LoginPageState loginPageState;
+
+  @override
+  State<_UsernamePasswordForm> createState() => _UsernamePasswordFormState();
+}
+
+class _UsernamePasswordFormState extends State<_UsernamePasswordForm> {
   final GlobalKey<FormFieldState<String>> _usernameKey = GlobalKey();
   final GlobalKey<FormFieldState<String>> _passwordKey = GlobalKey();
 
@@ -255,20 +497,11 @@ class _PasswordLoginPageState extends State<PasswordLoginPage> {
     });
   }
 
-  bool _inProgress = false;
-
-  Future<int> _getUserId(FetchApiKeyResult fetchApiKeyResult) async {
-    final FetchApiKeyResult(:email, :apiKey) = fetchApiKeyResult;
-    final connection = ApiConnection.live( // TODO make this widget testable
-      realmUrl: widget.serverSettings.realmUri,
-      zulipFeatureLevel: widget.serverSettings.zulipFeatureLevel,
-      email: email, apiKey: apiKey);
-    return (await getOwnUser(connection)).userId;
-  }
-
   void _submit() async {
+    final serverSettings = widget.loginPageState.widget.serverSettings;
+
     final context = _usernameKey.currentContext!;
-    final realmUrl = widget.serverSettings.realmUri;
+    final realmUrl = serverSettings.realmUrl;
     final usernameFieldState = _usernameKey.currentState!;
     final passwordFieldState = _passwordKey.currentState!;
     final usernameValid = usernameFieldState.validate(); // Side effect: on-field error text
@@ -276,19 +509,24 @@ class _PasswordLoginPageState extends State<PasswordLoginPage> {
     if (!usernameValid || !passwordValid) {
       return;
     }
-    final String username = usernameFieldState.value!;
+    final String username = usernameFieldState.value!.trim();
     final String password = passwordFieldState.value!;
 
-    setState(() {
-      _inProgress = true;
+    widget.loginPageState.setState(() {
+      widget.loginPageState._inProgress = true;
     });
     try {
       final FetchApiKeyResult result;
       try {
-        result = await fetchApiKey(
-          realmUrl: realmUrl,
-          zulipFeatureLevel: widget.serverSettings.zulipFeatureLevel,
-          username: username, password: password);
+        final globalStore = GlobalStoreWidget.of(context);
+        final connection = globalStore.apiConnection(realmUrl: realmUrl,
+          zulipFeatureLevel: serverSettings.zulipFeatureLevel);
+        try {
+          result = await fetchApiKey(connection,
+            username: username, password: password);
+        } finally {
+          connection.close();
+        }
       } on ApiRequestException catch (e) {
         if (!context.mounted) return;
         // TODO(#105) give more helpful feedback. The RN app is
@@ -305,37 +543,22 @@ class _PasswordLoginPageState extends State<PasswordLoginPage> {
       }
 
       // TODO(server-7): Rely on user_id from fetchApiKey.
-      final int userId = result.userId ?? await _getUserId(result);
+      final int userId = result.userId
+        ?? await widget.loginPageState._getUserId(result.email, result.apiKey);
       // https://github.com/dart-lang/linter/issues/4007
       // ignore: use_build_context_synchronously
       if (!context.mounted) {
         return;
       }
 
-      final globalStore = GlobalStoreWidget.of(context);
-      // TODO(#108): give feedback to user on SQL exception, like dupe realm+user
-      final accountId = await globalStore.insertAccount(AccountsCompanion.insert(
-        realmUrl: realmUrl,
+      await widget.loginPageState._tryInsertAccountAndNavigate(
         email: result.email,
         apiKey: result.apiKey,
         userId: userId,
-        zulipFeatureLevel: widget.serverSettings.zulipFeatureLevel,
-        zulipVersion: widget.serverSettings.zulipVersion,
-        zulipMergeBase: Value(widget.serverSettings.zulipMergeBase),
-      ));
-      // https://github.com/dart-lang/linter/issues/4007
-      // ignore: use_build_context_synchronously
-      if (!context.mounted) {
-        return;
-      }
-
-      Navigator.of(context).pushAndRemoveUntil(
-        HomePage.buildRoute(accountId: accountId),
-        (route) => (route is! _LoginSequenceRoute),
       );
     } finally {
-      setState(() {
-        _inProgress = false;
+      widget.loginPageState.setState(() {
+        widget.loginPageState._inProgress = false;
       });
     }
   }
@@ -343,8 +566,9 @@ class _PasswordLoginPageState extends State<PasswordLoginPage> {
   @override
   Widget build(BuildContext context) {
     assert(!PerAccountStoreWidget.debugExistsOf(context));
+    final serverSettings = widget.loginPageState.widget.serverSettings;
     final zulipLocalizations = ZulipLocalizations.of(context);
-    final requireEmailFormatUsernames = widget.serverSettings.requireEmailFormatUsernames;
+    final requireEmailFormatUsernames = serverSettings.requireEmailFormatUsernames;
 
     final usernameField = TextFormField(
       key: _usernameKey,
@@ -379,7 +603,7 @@ class _PasswordLoginPageState extends State<PasswordLoginPage> {
       key: _passwordKey,
       autofillHints: const [AutofillHints.password],
       obscureText: _obscurePassword,
-      keyboardType: TextInputType.visiblePassword,
+      keyboardType: _obscurePassword ? null : TextInputType.visiblePassword,
       autovalidateMode: AutovalidateMode.onUserInteraction,
       validator: (value) {
         if (value == null || value.isEmpty) {
@@ -392,42 +616,54 @@ class _PasswordLoginPageState extends State<PasswordLoginPage> {
       decoration: InputDecoration(
         labelText: zulipLocalizations.loginPasswordLabel,
         helperText: kLayoutPinningHelperText,
-        // TODO(material-3): Simplify away `Semantics` by using IconButton's
-        //   M3-only params `isSelected` / `selectedIcon`, after fixing
-        //   https://github.com/flutter/flutter/issues/127145 . (Also, the
-        //   `Semantics` seen here would misbehave in M3 for reasons
-        //   involving a `Semantics` with `container: true` in an underlying
-        //   [ButtonStyleButton].)
-        suffixIcon: Semantics(toggled: _obscurePassword,
-          child: IconButton(
-            tooltip: zulipLocalizations.loginHidePassword,
-            onPressed: _handlePasswordVisibilityPress,
-            icon: _obscurePassword
-              ? const Icon(Icons.visibility_off)
-              : const Icon(Icons.visibility)))));
+        suffixIcon: IconButton(
+          tooltip: zulipLocalizations.loginHidePassword,
+          onPressed: _handlePasswordVisibilityPress,
+          icon: const Icon(Icons.visibility),
+          isSelected: _obscurePassword,
+          selectedIcon: const Icon(Icons.visibility_off),
+        )));
 
-    return Scaffold(
-      appBar: AppBar(title: Text(zulipLocalizations.loginPageTitle),
-        bottom: _inProgress
-          ? const PreferredSize(preferredSize: Size.fromHeight(4),
-              child: LinearProgressIndicator(minHeight: 4)) // 4 restates default
-          : null),
-      body: SafeArea(
-        minimum: const EdgeInsets.all(8),
-        child: Center(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 400),
-            child: Form(
-              // TODO(#110) Try to highlight CZO / Zulip Cloud realms in autofill
-              child: AutofillGroup(
-                child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-                  usernameField,
-                  const SizedBox(height: 8),
-                  passwordField,
-                  const SizedBox(height: 8),
-                  ElevatedButton(
-                    onPressed: _inProgress ? null : _submit,
-                    child: Text(zulipLocalizations.loginFormSubmitLabel)),
-                ])))))));
+    return Form(
+      // TODO(#110) Try to highlight CZO / Zulip Cloud realms in autofill
+      child: AutofillGroup(
+        child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+          usernameField,
+          const SizedBox(height: 8),
+          passwordField,
+          const SizedBox(height: 8),
+          ElevatedButton(
+            onPressed: widget.loginPageState._inProgress ? null : _submit,
+            child: Text(zulipLocalizations.loginFormSubmitLabel)),
+        ])));
+  }
+}
+
+// Loosely based on the corresponding element in the web app.
+class OrDivider extends StatelessWidget {
+  const OrDivider({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final zulipLocalizations = ZulipLocalizations.of(context);
+    final designVariables = DesignVariables.of(context);
+
+    final divider = Expanded(
+      child: Divider(color: designVariables.loginOrDivider, thickness: 2));
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
+        divider,
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 5),
+          child: Text(zulipLocalizations.loginMethodDivider,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: designVariables.loginOrDividerText,
+              height: 1.5,
+            ).merge(weightVariableTextStyle(context, wght: 600)))),
+        divider,
+      ]));
   }
 }

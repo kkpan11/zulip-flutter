@@ -5,16 +5,23 @@
 *.swp
 .DS_Store
 .atom/
+.build/
 .buildlog/
 .history
 .svn/
+.swiftpm/
 migrate_working_dir/
 
 # IntelliJ related
 *.iml
 *.ipr
 *.iws
-.idea/
+/.idea/*
+/android/.idea/*
+!/.idea/inspectionProfiles/
+!/.idea/modules.xml
+!/.idea/zulip.iml
+!/android/.idea/inspectionProfiles/
 
 # The .vscode folder contains launch configuration and tasks you configure in
 # VS Code which you may wish to be included in version control, so this line
@@ -25,6 +32,7 @@ migrate_working_dir/
 **/doc/api/
 **/ios/Flutter/.last_build_id
 .dart_tool/
+/devtools_options.yaml
 .flutter-plugins
 .flutter-plugins-dependencies
 .packages

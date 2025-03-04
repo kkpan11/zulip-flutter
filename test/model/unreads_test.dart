@@ -5,15 +5,18 @@ import 'package:zulip/api/model/events.dart';
 import 'package:zulip/api/model/initial_snapshot.dart';
 import 'package:zulip/api/model/model.dart';
 import 'package:zulip/model/narrow.dart';
+import 'package:zulip/model/store.dart';
 import 'package:zulip/model/unreads.dart';
 
 import '../example_data.dart' as eg;
+import 'test_store.dart';
 import 'unreads_checks.dart';
 
 void main() {
   // These variables are the common state operated on by each test.
   // Each test case calls [prepare] to initialize them.
   late Unreads model;
+  late PerAccountStore channelStore; // TODO reduce this to ChannelStore
   late int notifiedCount;
 
   void checkNotified({required int count}) {
@@ -27,15 +30,17 @@ void main() {
   void prepare({
     UnreadMessagesSnapshot initial = const UnreadMessagesSnapshot(
       count: 0,
-      streams: [],
+      channels: [],
       dms: [],
       huddles: [],
       mentions: [],
       oldUnreadsMissing: false,
     ),
   }) {
+    channelStore = eg.store();
     notifiedCount = 0;
-    model = Unreads(initial: initial, selfUserId: eg.selfUser.userId)
+    model = Unreads(initial: initial,
+        selfUserId: eg.selfUser.userId, channelStore: channelStore)
       ..addListener(() {
         notifiedCount++;
       });
@@ -53,7 +58,7 @@ void main() {
     assert(Set.of(messages.map((m) => m.id)).length == messages.length,
       'checkMatchesMessages: duplicate messages in test input');
 
-    final Map<int, Map<String, QueueList<int>>> expectedStreams = {};
+    final Map<int, Map<TopicName, QueueList<int>>> expectedStreams = {};
     final Map<DmNarrow, QueueList<int>> expectedDms = {};
     final Set<int> expectedMentions = {};
     for (final message in messages) {
@@ -63,7 +68,7 @@ void main() {
       switch (message) {
         case StreamMessage():
           final perTopic = expectedStreams[message.streamId] ??= {};
-          final messageIds = perTopic[message.subject] ??= QueueList();
+          final messageIds = perTopic[message.topic] ??= QueueList();
           messageIds.add(message.id);
         case DmMessage():
           final narrow = DmNarrow.ofMessage(message, selfUserId: eg.selfUser.userId);
@@ -108,11 +113,11 @@ void main() {
 
       prepare(initial: UnreadMessagesSnapshot(
         count: 0,
-        streams: [
-          UnreadStreamSnapshot(streamId: stream1.streamId, topic: 'a', unreadMessageIds: [1, 2]),
-          UnreadStreamSnapshot(streamId: stream1.streamId, topic: 'b', unreadMessageIds: [3, 4]),
-          UnreadStreamSnapshot(streamId: stream2.streamId, topic: 'b', unreadMessageIds: [5, 6]),
-          UnreadStreamSnapshot(streamId: stream2.streamId, topic: 'c', unreadMessageIds: [7, 8]),
+        channels: [
+          eg.unreadChannelMsgs(streamId: stream1.streamId, topic: 'a', unreadMessageIds: [1, 2]),
+          eg.unreadChannelMsgs(streamId: stream1.streamId, topic: 'b', unreadMessageIds: [3, 4]),
+          eg.unreadChannelMsgs(streamId: stream2.streamId, topic: 'b', unreadMessageIds: [5, 6]),
+          eg.unreadChannelMsgs(streamId: stream2.streamId, topic: 'c', unreadMessageIds: [7, 8]),
         ],
         dms: [
           UnreadDmSnapshot(otherUserId: 1, unreadMessageIds: [9, 10]),
@@ -144,6 +149,138 @@ void main() {
         eg.dmMessage(id: 16, from: user2, to: [user3, eg.selfUser], flags: [MessageFlag.wildcardMentioned]),
       ]);
     });
+  });
+
+  group('count helpers', () {
+    test('countInCombinedFeedNarrow', () async {
+      final stream1 = eg.stream();
+      final stream2 = eg.stream();
+      final stream3 = eg.stream();
+      prepare();
+      await channelStore.addStreams([stream1, stream2, stream3]);
+      await channelStore.addSubscription(eg.subscription(stream1));
+      await channelStore.addSubscription(eg.subscription(stream2));
+      await channelStore.addSubscription(eg.subscription(stream3, isMuted: true));
+      await channelStore.addUserTopic(stream1, 'a', UserTopicVisibilityPolicy.muted);
+      fillWithMessages([
+        eg.streamMessage(stream: stream1, topic: 'a', flags: []),
+        eg.streamMessage(stream: stream1, topic: 'b', flags: []),
+        eg.streamMessage(stream: stream1, topic: 'b', flags: []),
+        eg.streamMessage(stream: stream2, topic: 'c', flags: []),
+        eg.streamMessage(stream: stream3, topic: 'd', flags: []),
+        eg.dmMessage(from: eg.otherUser, to: [eg.selfUser], flags: []),
+        eg.dmMessage(from: eg.thirdUser, to: [eg.selfUser], flags: []),
+      ]);
+      check(model.countInCombinedFeedNarrow()).equals(5);
+    });
+
+    test('countInChannel/Narrow', () async {
+      final stream = eg.stream();
+      prepare();
+      await channelStore.addStream(stream);
+      await channelStore.addSubscription(eg.subscription(stream));
+      await channelStore.addUserTopic(stream, 'a', UserTopicVisibilityPolicy.unmuted);
+      await channelStore.addUserTopic(stream, 'c', UserTopicVisibilityPolicy.muted);
+      fillWithMessages([
+        eg.streamMessage(stream: stream, topic: 'a', flags: []),
+        eg.streamMessage(stream: stream, topic: 'a', flags: []),
+        eg.streamMessage(stream: stream, topic: 'b', flags: []),
+        eg.streamMessage(stream: stream, topic: 'b', flags: []),
+        eg.streamMessage(stream: stream, topic: 'b', flags: []),
+        eg.streamMessage(stream: stream, topic: 'c', flags: []),
+      ]);
+      check(model.countInChannel      (stream.streamId)).equals(5);
+      check(model.countInChannelNarrow(stream.streamId)).equals(5);
+
+      await channelStore.handleEvent(SubscriptionUpdateEvent(id: 1,
+        streamId: stream.streamId,
+        property: SubscriptionProperty.isMuted, value: true));
+      check(model.countInChannel      (stream.streamId)).equals(2);
+      check(model.countInChannelNarrow(stream.streamId)).equals(5);
+    });
+
+    test('countInTopicNarrow', () {
+      final stream = eg.stream();
+      prepare();
+      fillWithMessages(List.generate(7, (i) => eg.streamMessage(
+        stream: stream, topic: 'a', flags: [])));
+      check(model.countInTopicNarrow(stream.streamId, eg.t('a'))).equals(7);
+    });
+
+    test('countInDmNarrow', () {
+      prepare();
+      fillWithMessages(List.generate(5, (i) => eg.dmMessage(
+        from: eg.otherUser, to: [eg.selfUser], flags: [])));
+      final narrow = DmNarrow.withUser(
+        eg.otherUser.userId, selfUserId: eg.selfUser.userId);
+      check(model.countInDmNarrow(narrow)).equals(5);
+    });
+
+    test('countInMentionsNarrow', () async {
+      final stream = eg.stream();
+      prepare();
+      await channelStore.addStream(stream);
+      fillWithMessages([
+        eg.streamMessage(stream: stream, flags: []),
+        eg.streamMessage(stream: stream, flags: [MessageFlag.mentioned]),
+        eg.streamMessage(stream: stream, flags: [MessageFlag.wildcardMentioned]),
+      ]);
+      check(model.countInMentionsNarrow()).equals(2);
+    });
+
+    test('countInStarredMessagesNarrow', () async {
+      final stream = eg.stream();
+      prepare();
+      await channelStore.addStream(stream);
+      fillWithMessages([
+        eg.streamMessage(stream: stream, flags: []),
+        eg.streamMessage(stream: stream, flags: [MessageFlag.starred]),
+      ]);
+      check(model.countInStarredMessagesNarrow()).equals(0);
+    });
+  });
+
+  group('isUnread', () {
+    final unreadDmMessage = eg.dmMessage(
+      from: eg.otherUser, to: [eg.selfUser], flags: []);
+    final readDmMessage = eg.dmMessage(
+      from: eg.otherUser, to: [eg.selfUser], flags: [MessageFlag.read]);
+    final unreadChannelMessage = eg.streamMessage(flags: []);
+    final readChannelMessage = eg.streamMessage(flags: [MessageFlag.read]);
+
+    final allMessages = [
+      unreadDmMessage, unreadChannelMessage,
+      readDmMessage,   readChannelMessage,
+    ];
+
+    void doTestCommon(String description, int messageId, {required bool expected}) {
+      test(description, () {
+        prepare();
+        model.oldUnreadsMissing = false;
+        fillWithMessages(allMessages);
+        check(model.isUnread(messageId)).equals(expected);
+      });
+    }
+
+    void doTestOldUnreadsMissing(String description, int messageId, {required bool? expected}) {
+      assert(expected == true || expected == null);
+      test('oldUnreadsMissing; $description', () {
+        prepare();
+        model.oldUnreadsMissing = true;
+        fillWithMessages(allMessages);
+        check(model.isUnread(messageId)).equals(expected);
+      });
+    }
+
+    doTestCommon('unread DM message',      unreadDmMessage.id,      expected: true);
+    doTestCommon('read DM message',        readDmMessage.id,        expected: false);
+    doTestCommon('unread channel message', unreadChannelMessage.id, expected: true);
+    doTestCommon('read channel message',   readChannelMessage.id,   expected: false);
+
+    doTestOldUnreadsMissing('unread DM message',      unreadDmMessage.id,      expected: true);
+    doTestOldUnreadsMissing('read DM message',        readDmMessage.id,        expected: null);
+    doTestOldUnreadsMissing('unread channel message', unreadChannelMessage.id, expected: true);
+    doTestOldUnreadsMissing('read channel message',   readChannelMessage.id,   expected: null);
   });
 
   group('handleMessageEvent', () {
@@ -204,8 +341,8 @@ void main() {
             oldTopic == newTopic ? 'same topic' : 'different topic',
           ].join(' / ');
           test(description, () {
-            final oldMessage = eg.streamMessage(id: 1, stream: oldStream, topic: oldTopic, flags: []);
-            final newMessage = eg.streamMessage(id: 2, stream: newStream, topic: newTopic, flags: []);
+            final oldMessage = eg.streamMessage(stream: oldStream, topic: oldTopic, flags: []);
+            final newMessage = eg.streamMessage(stream: newStream, topic: newTopic, flags: []);
 
             prepare();
             fillWithMessages([oldMessage]);
@@ -241,10 +378,10 @@ void main() {
 
       group('new unread follows existing unread', () {
         for (final (oldDesc, oldFrom, oldTo) in variousDms) {
-          final oldMessage = eg.dmMessage(id: 1, from: oldFrom, to: oldTo, flags: []);
+          final oldMessage = eg.dmMessage(from: oldFrom, to: oldTo, flags: []);
           final oldNarrow = DmNarrow.ofMessage(oldMessage, selfUserId: eg.selfUser.userId);
           for (final (newDesc, newFrom, newTo) in variousDms) {
-            final newMessage = eg.dmMessage(id: 2, from: newFrom, to: newTo, flags: []);
+            final newMessage = eg.dmMessage(from: newFrom, to: newTo, flags: []);
             final newNarrow = DmNarrow.ofMessage(newMessage, selfUserId: eg.selfUser.userId);
 
             test('existing in $oldDesc narrow; new in ${oldNarrow == newNarrow ? 'same narrow' : 'different narrow ($newDesc)'}', () {
@@ -286,7 +423,7 @@ void main() {
                 if (!isKnownToModel) {
                   check(because: "no crash if message is in model's blindspots",
                     () => model.handleUpdateMessageEvent(
-                      UpdateMessageEvent(id: 0, messageId: message.id, messageIds: [], flags: newFlags),
+                      eg.updateMessageEditEvent(message, flags: newFlags),
                     )).returnsNormally();
                   // Rarely, this event will be about an unread that's unknown
                   // to the model, or at least one of the model's components;
@@ -307,7 +444,7 @@ void main() {
                   continue;
                 }
                 model.handleUpdateMessageEvent(
-                  UpdateMessageEvent(id: 0, messageId: message.id, messageIds: [], flags: newFlags),
+                  eg.updateMessageEditEvent(message, flags: newFlags),
                 );
 
                 if (
@@ -374,9 +511,15 @@ void main() {
             messageType: MessageType.stream,
             messageIds: [message.id],
             streamId: message.streamId,
-            topic: message.subject,
+            topic: message.topic,
           ),
-          DmMessage() => DeleteMessageEvent(id: 0, messageType: MessageType.private, messageIds: [message.id]),
+          DmMessage() => DeleteMessageEvent(
+            id: 0,
+            messageType: MessageType.direct,
+            messageIds: [message.id],
+            streamId: null,
+            topic: null,
+          ),
         };
         model.handleDeleteMessageEvent(event);
         checkNotifiedOnce();
@@ -395,7 +538,7 @@ void main() {
         messageIds: [11, 12],
         messageType: MessageType.stream,
         streamId: stream1.streamId,
-        topic: 'a',
+        topic: eg.t('a'),
       ));
       checkNotifiedOnce();
       checkMatchesMessages(expectedRemainingMessages..removeAll([message11, message12]));
@@ -404,14 +547,16 @@ void main() {
         messageIds: [13, 14],
         messageType: MessageType.stream,
         streamId: stream2.streamId,
-        topic: 'b',
+        topic: eg.t('b'),
       ));
       checkNotifiedOnce();
       checkMatchesMessages(expectedRemainingMessages..removeAll([message13, message14]));
       model.handleDeleteMessageEvent(DeleteMessageEvent(
         id: 0,
         messageIds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-        messageType: MessageType.private,
+        messageType: MessageType.direct,
+        streamId: null,
+        topic: null,
       ));
       checkNotifiedOnce();
       checkMatchesMessages([]);
@@ -427,7 +572,7 @@ void main() {
         messageIds: [message.id],
         messageType: MessageType.stream,
         streamId: message.streamId,
-        topic: message.subject,
+        topic: message.topic,
       ));
       // TODO improve implementation; then:
       //   checkNotNotified();
@@ -444,7 +589,9 @@ void main() {
       model.handleDeleteMessageEvent(DeleteMessageEvent(
         id: 0,
         messageIds: [message.id],
-        messageType: MessageType.private,
+        messageType: MessageType.direct,
+        streamId: null,
+        topic: null,
       ));
       // TODO improve implementation; then:
       //   checkNotNotified();
@@ -534,10 +681,10 @@ void main() {
       // the model, so we get coverage for that case too.
       test('add flag: ${mentionFlag.name}', () {
         final messages = [
-          eg.streamMessage(id: 1, flags: []),
-          eg.streamMessage(id: 2, flags: [MessageFlag.read]),
-          eg.dmMessage(id: 3, from: eg.otherUser, to: [eg.selfUser], flags: []),
-          eg.dmMessage(id: 4, from: eg.otherUser, to: [eg.selfUser], flags: [MessageFlag.read]),
+          eg.streamMessage(flags: []),
+          eg.streamMessage(flags: [MessageFlag.read]),
+          eg.dmMessage(from: eg.otherUser, to: [eg.selfUser], flags: []),
+          eg.dmMessage(from: eg.otherUser, to: [eg.selfUser], flags: [MessageFlag.read]),
         ];
 
         prepare();
@@ -571,10 +718,10 @@ void main() {
       // the model, so we get coverage for that case too.
       test('remove flag: ${mentionFlag.name}', () {
         final messages = [
-          eg.streamMessage(id: 1, flags: [mentionFlag]),
-          eg.streamMessage(id: 2, flags: [mentionFlag, MessageFlag.read]),
-          eg.dmMessage(id: 3, from: eg.otherUser, to: [eg.selfUser], flags: [mentionFlag]),
-          eg.dmMessage(id: 4, from: eg.otherUser, to: [eg.selfUser], flags: [mentionFlag, MessageFlag.read]),
+          eg.streamMessage(flags: [mentionFlag]),
+          eg.streamMessage(flags: [mentionFlag, MessageFlag.read]),
+          eg.dmMessage(from: eg.otherUser, to: [eg.selfUser], flags: [mentionFlag]),
+          eg.dmMessage(from: eg.otherUser, to: [eg.selfUser], flags: [mentionFlag, MessageFlag.read]),
         ];
 
         prepare();
@@ -746,7 +893,8 @@ void main() {
     });
 
     group('mark as unread', () {
-      mkEvent(messages) => eg.updateMessageFlagsRemoveEvent(MessageFlag.read, messages);
+      UpdateMessageFlagsEvent mkEvent(Iterable<Message> messages) =>
+        eg.updateMessageFlagsRemoveEvent(MessageFlag.read, messages);
 
       test('usual cases', () {
         final stream1 = eg.stream(streamId: 1);
@@ -881,12 +1029,12 @@ void main() {
                 type: MessageType.stream,
                 mentioned: false,
                 streamId: stream.streamId,
-                topic: topic,
+                topic: eg.t(topic),
                 userIds: null,
               ),
               // message 2 and 3 have their details missing
               message4.id: UpdateMessageFlagsMessageDetail(
-                type: MessageType.private,
+                type: MessageType.direct,
                 mentioned: false,
                 streamId: null,
                 topic: null,
@@ -904,5 +1052,19 @@ void main() {
         checkMatchesMessages([message1, message2, message3, message4]);
       });
     });
+  });
+
+  group('handleAllMessagesReadSuccess', () {
+      prepare();
+      fillWithMessages([]);
+
+      // We didn't fill the model with 50k unreads, so this is questionably
+      // realistic… but the 50k cap isn't actually API-guaranteed, and this is
+      // plausibly realistic for a hypothetical server that decides based on
+      // message age rather than the 50k cap.
+      model.oldUnreadsMissing = true;
+      model.handleAllMessagesReadSuccess();
+      checkNotifiedOnce();
+      check(model).oldUnreadsMissing.isFalse();
   });
 }

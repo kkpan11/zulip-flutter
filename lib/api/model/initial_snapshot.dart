@@ -24,6 +24,28 @@ class InitialSnapshot {
 
   final List<CustomProfileField> customProfileFields;
 
+  /// The realm-level policy, on pre-FL 163 servers, for visibility of real email addresses.
+  ///
+  /// Search for "email_address_visibility" in https://zulip.com/api/register-queue.
+  ///
+  /// This field is removed in Zulip 7.0 (FL 163) and replaced with a user-level
+  /// setting:
+  ///   * https://zulip.com/api/update-settings#parameter-email_address_visibility
+  ///   * https://zulip.com/api/update-realm-user-settings-defaults#parameter-email_address_visibility
+  final EmailAddressVisibility? emailAddressVisibility; // TODO(server-7): remove
+
+  // TODO(server-8): Remove the default values.
+  @JsonKey(defaultValue: 15000)
+  final int serverTypingStartedExpiryPeriodMilliseconds;
+  @JsonKey(defaultValue: 5000)
+  final int serverTypingStoppedWaitPeriodMilliseconds;
+  @JsonKey(defaultValue: 10000)
+  final int serverTypingStartedWaitPeriodMilliseconds;
+
+  // final List<…> mutedTopics; // TODO(#422) we ignore this feature on older servers
+
+  final Map<String, RealmEmojiItem> realmEmoji;
+
   final List<RecentDmConversation> recentPrivateConversations;
 
   final List<Subscription> subscriptions;
@@ -40,9 +62,28 @@ class InitialSnapshot {
   // TODO(server-5) remove pre-5.0 comment
   final UserSettings? userSettings; // TODO(server-5)
 
+  final List<UserTopicItem>? userTopics; // TODO(server-6)
+
+  /// The policy for who can use wildcard mentions in large channels.
+  ///
+  /// Search for "realm_wildcard_mention_policy" in https://zulip.com/api/register-queue.
+  final RealmWildcardMentionPolicy realmWildcardMentionPolicy;
+
+  final bool realmMandatoryTopics;
+
+  /// The number of days until a user's account is treated as a full member.
+  ///
+  /// Search for "realm_waiting_period_threshold" in https://zulip.com/api/register-queue.
+  ///
+  /// For how to determine if a user is a full member, see:
+  ///   https://zulip.com/api/roles-and-permissions#determining-if-a-user-is-a-full-member
+  final int realmWaitingPeriodThreshold;
+
   final Map<String, RealmDefaultExternalAccount> realmDefaultExternalAccounts;
 
   final int maxFileUploadSizeMib;
+
+  final Uri? serverEmojiDataUrl; // TODO(server-6)
 
   @JsonKey(readValue: _readUsersIsActiveFallbackTrue)
   final List<User> realmUsers;
@@ -57,36 +98,46 @@ class InitialSnapshot {
   // `is_active` is sometimes absent:
   //   https://chat.zulip.org/#narrow/stream/412-api-documentation/topic/.60is_active.60.20in.20.60.2Fregister.60.20response/near/1371603
   // But for our model it's convenient to always have it; so, fill it in.
-  static Object? _readUsersIsActiveFallbackTrue(Map json, String key) {
+  static Object? _readUsersIsActiveFallbackTrue(Map<dynamic, dynamic> json, String key) {
     final list = (json[key] as List<dynamic>);
-    for (final Map<String, dynamic> user in list) {
-      user.putIfAbsent('is_active', () => true);
+    for (final user in list) {
+      (user as Map<String, dynamic>).putIfAbsent('is_active', () => true);
     }
     return list;
   }
-  static Object? _readUsersIsActiveFallbackFalse(Map json, String key) {
+  static Object? _readUsersIsActiveFallbackFalse(Map<dynamic, dynamic> json, String key) {
     final list = (json[key] as List<dynamic>);
-    for (final Map<String, dynamic> user in list) {
-      user.putIfAbsent('is_active', () => false);
+    for (final user in list) {
+      (user as Map<String, dynamic>).putIfAbsent('is_active', () => false);
     }
     return list;
   }
 
   InitialSnapshot({
-    this.queueId,
+    required this.queueId,
     required this.lastEventId,
     required this.zulipFeatureLevel,
     required this.zulipVersion,
-    this.zulipMergeBase,
+    required this.zulipMergeBase,
     required this.alertWords,
     required this.customProfileFields,
+    required this.emailAddressVisibility,
+    required this.serverTypingStartedExpiryPeriodMilliseconds,
+    required this.serverTypingStoppedWaitPeriodMilliseconds,
+    required this.serverTypingStartedWaitPeriodMilliseconds,
+    required this.realmEmoji,
     required this.recentPrivateConversations,
     required this.subscriptions,
     required this.unreadMsgs,
     required this.streams,
     required this.userSettings,
+    required this.userTopics,
+    required this.realmWildcardMentionPolicy,
+    required this.realmMandatoryTopics,
+    required this.realmWaitingPeriodThreshold,
     required this.realmDefaultExternalAccounts,
     required this.maxFileUploadSizeMib,
+    required this.serverEmojiDataUrl,
     required this.realmUsers,
     required this.realmNonActiveUsers,
     required this.crossRealmBots,
@@ -96,6 +147,30 @@ class InitialSnapshot {
     _$InitialSnapshotFromJson(json);
 
   Map<String, dynamic> toJson() => _$InitialSnapshotToJson(this);
+}
+
+enum EmailAddressVisibility {
+  @JsonValue(1) everyone,
+  @JsonValue(2) members,
+  @JsonValue(3) admins,
+  @JsonValue(4) nobody,
+  @JsonValue(5) moderators,
+}
+
+@JsonEnum(valueField: 'apiValue')
+enum RealmWildcardMentionPolicy {
+  everyone(apiValue: 1),
+  members(apiValue: 2),
+  fullMembers(apiValue: 3),
+  admins(apiValue: 5),
+  nobody(apiValue: 6),
+  moderators(apiValue: 7);
+
+  const RealmWildcardMentionPolicy({required this.apiValue});
+
+  final int? apiValue;
+
+  int? toJson() => apiValue;
 }
 
 /// An item in `realm_default_external_accounts`.
@@ -153,7 +228,7 @@ class UserSettings {
   Emojiset emojiset;
 
   // TODO more, as needed. When adding a setting here, please also:
-  // (1) add it to the [UserSettingName] enum below
+  // (1) add it to the [UserSettingName] enum
   // (2) then re-run the command to refresh the .g.dart files
   // (3) handle the event that signals an update to the setting
 
@@ -174,45 +249,29 @@ class UserSettings {
   static final Iterable<String> debugKnownNames = _$UserSettingsFieldMap.keys;
 }
 
-/// The name of a user setting that has a property in [UserSettings].
+/// An item in the `user_topics` snapshot.
 ///
-/// In Zulip event-handling code (for [UserSettingsUpdateEvent]),
-/// we switch exhaustively on a value of this type
-/// to ensure that every setting in [UserSettings] responds to the event.
-@JsonEnum(fieldRename: FieldRename.snake, alwaysCreate: true)
-enum UserSettingName {
-  twentyFourHourTime,
-  displayEmojiReactionUsers,
-  emojiset;
+/// For docs, search for "user_topics:"
+/// in <https://zulip.com/api/register-queue>.
+@JsonSerializable(fieldRename: FieldRename.snake)
+class UserTopicItem {
+  final int streamId;
+  final TopicName topicName;
+  final int lastUpdated;
+  @JsonKey(unknownEnumValue: UserTopicVisibilityPolicy.unknown)
+  final UserTopicVisibilityPolicy visibilityPolicy;
 
-  /// Get a [UserSettingName] from a raw, snake-case string we recognize, else null.
-  ///
-  /// Example:
-  ///   'display_emoji_reaction_users' -> UserSettingName.displayEmojiReactionUsers
-  static UserSettingName? fromRawString(String raw) => _byRawString[raw];
+  UserTopicItem({
+    required this.streamId,
+    required this.topicName,
+    required this.lastUpdated,
+    required this.visibilityPolicy,
+  });
 
-  // _$…EnumMap is thanks to `alwaysCreate: true` and `fieldRename: FieldRename.snake`
-  static final _byRawString = _$UserSettingNameEnumMap
-    .map((key, value) => MapEntry(value, key));
-}
+  factory UserTopicItem.fromJson(Map<String, dynamic> json) =>
+    _$UserTopicItemFromJson(json);
 
-/// As in [UserSettings.emojiset].
-@JsonEnum(fieldRename: FieldRename.kebab, alwaysCreate: true)
-enum Emojiset {
-  google,
-  googleBlob,
-  twitter,
-  text;
-
-  /// Get an [Emojiset] from a raw string. Throws if the string is unrecognized.
-  ///
-  /// Example:
-  ///   'google-blob' -> Emojiset.googleBlob
-  static Emojiset fromRawString(String raw) => _byRawString[raw]!;
-
-  // _$…EnumMap is thanks to `alwaysCreate: true` and `fieldRename: FieldRename.kebab`
-  static final _byRawString = _$EmojisetEnumMap
-    .map((key, value) => MapEntry(value, key));
+  Map<String, dynamic> toJson() => _$UserTopicItemToJson(this);
 }
 
 /// The `unread_msgs` snapshot.
@@ -226,7 +285,8 @@ class UnreadMessagesSnapshot {
   @JsonKey(name: 'pms')
   final List<UnreadDmSnapshot> dms;
 
-  final List<UnreadStreamSnapshot> streams;
+  @JsonKey(name: 'streams')
+  final List<UnreadChannelSnapshot> channels;
   final List<UnreadHuddleSnapshot> huddles;
 
   // Unlike other lists of message IDs here, [mentions] is *not* sorted.
@@ -237,7 +297,7 @@ class UnreadMessagesSnapshot {
   const UnreadMessagesSnapshot({
     required this.count,
     required this.dms,
-    required this.streams,
+    required this.channels,
     required this.huddles,
     required this.mentions,
     required this.oldUnreadsMissing,
@@ -257,7 +317,7 @@ class UnreadDmSnapshot {
   final List<int> unreadMessageIds;
 
   // TODO(server-5): Simplify away.
-  static _readOtherUserId(Map json, String key) {
+  static dynamic _readOtherUserId(Map<dynamic, dynamic> json, String key) {
     return json[key] ?? json['sender_id'];
   }
 
@@ -272,23 +332,23 @@ class UnreadDmSnapshot {
   Map<String, dynamic> toJson() => _$UnreadDmSnapshotToJson(this);
 }
 
-/// An item in [UnreadMessagesSnapshot.streams].
+/// An item in [UnreadMessagesSnapshot.channels].
 @JsonSerializable(fieldRename: FieldRename.snake)
-class UnreadStreamSnapshot {
-  final String topic;
+class UnreadChannelSnapshot {
+  final TopicName topic;
   final int streamId;
   final List<int> unreadMessageIds;
 
-  UnreadStreamSnapshot({
+  UnreadChannelSnapshot({
     required this.topic,
     required this.streamId,
     required this.unreadMessageIds,
   }) : assert(isSortedWithoutDuplicates(unreadMessageIds));
 
-  factory UnreadStreamSnapshot.fromJson(Map<String, dynamic> json) =>
-    _$UnreadStreamSnapshotFromJson(json);
+  factory UnreadChannelSnapshot.fromJson(Map<String, dynamic> json) =>
+    _$UnreadChannelSnapshotFromJson(json);
 
-  Map<String, dynamic> toJson() => _$UnreadStreamSnapshotToJson(this);
+  Map<String, dynamic> toJson() => _$UnreadChannelSnapshotToJson(this);
 }
 
 /// An item in [UnreadMessagesSnapshot.huddles].

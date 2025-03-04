@@ -18,13 +18,22 @@ set -euo pipefail
 
 this_dir=${BASH_SOURCE[0]%/*}
 
+# shellcheck source=tools/lib/ensure-coreutils.sh
+. "${this_dir}"/lib/ensure-coreutils.sh
+
 # shellcheck source=tools/lib/git.sh
 . "${this_dir}"/lib/git.sh
 
 
 ## CLI PARSING
 
-default_suites=(analyze test build_runner drift icons)
+default_suites=(
+    analyze test
+    flutter_version
+    build_runner l10n drift pigeon icons
+    android  # This takes multiple minutes in CI, so do it last.
+)
+
 extra_suites=(
     shellcheck  # Requires its own dependency, from outside the pub system.
 )
@@ -77,7 +86,7 @@ while (( $# )); do
         --all) opt_files=all; opt_all=1; shift;;
         --fix) opt_fix=1; shift;;
         --verbose) opt_verbose=1; shift;;
-        analyze|test|build_runner|drift|icons|shellcheck)
+        analyze|test|flutter_version|build_runner|l10n|drift|pigeon|icons|android|shellcheck)
             opt_suites+=("$1"); shift;;
         *) usage;;
     esac
@@ -119,7 +128,19 @@ if_verbose() {
   fi
 }
 
-# True just if $opt_files intersects the given set of paths.
+# usage: grep_quiet_hungry GREP_ARGUMENTS...
+#
+# Just like `grep --quiet` aka `grep -q`, except this consumes the
+# whole input.  Useful when consuming a pipeline from a command that
+# isn't robust to having its stdout pipe broken.
+grep_quiet_hungry() {
+    grep --quiet "$@" && cat >/dev/null
+}
+
+# usage: files_check [GIT_PATHSPECS...]
+#
+# True just if $opt_files includes any files matching GIT_PATHSPECS.
+# For details on Git pathspecs, see `check_no_changes`.
 #
 # On what paths to include in this check (and more generally, how to write
 # conditions to implement `--diff`): Aim to cover perhaps 95% or 99% of the
@@ -172,7 +193,9 @@ files_check() {
 check_no_changes() {
     local change_description="$1"; shift
 
-    if git diff --quiet -- "$@" \
+    # We use `git diff -a` in order to include all matching files,
+    # overriding our `.gitattributes` which excludes generated files.
+    if git diff -a --quiet -- "$@" \
             && no_untracked_files "$@"; then
         return
     fi
@@ -199,6 +222,84 @@ run_test() {
     flutter test
 }
 
+# Check the Flutter version in pubspec.yaml is commented with a commit ID,
+# which agrees with the version, and the commit is from upstream main.
+run_flutter_version() {
+    # Omitted from this files check:
+    #   tools/check
+    files_check pubspec.yaml \
+    || return 0
+
+    local flutter_tree flutter_git
+    flutter_tree=$(flutter_tree)
+    flutter_git=( git --git-dir="${flutter_tree}"/.git )
+
+    # Parse our Flutter version spec and its commit-ID comment.
+    local parsed flutter_version flutter_commit
+    # shellcheck disable=SC2207 # output has controlled whitespace
+    parsed=( $(
+        perl <pubspec.yaml -0ne '
+             print "$1 $2" if (
+                 /^  sdk: .*\n  flutter: '\''>=(\S+)'\''\s*# ([0-9a-f]{40})$/m)'
+    ) ) || return
+    if [ -z "${#parsed[@]}" ]; then
+        echo >&2 "error: Flutter version spec not recognized in pubspec.yaml"
+        return 1
+    fi
+    flutter_version="${parsed[0]}"
+    flutter_commit="${parsed[1]}"
+
+    # Check the version name matches the commit ID.
+    local commit_described predicted_version
+    commit_described=$(
+        "${flutter_git[@]}" describe --tags "${flutter_commit}"
+    ) || return
+    predicted_version=$(
+        echo "${commit_described}" \
+        | perl -lne 'print if (s
+             # This transformation is ad hoc.
+             # If we find cases where it fails, we can study
+             # how the `flutter` tool actually decides the version name.
+             <^(\d+\.\d+\.\d+-) (\d+) (\.\d+\.pre) -(\d+) -g[0-9a-f]+$>
+             <$1 . ($2 + 1) . $3 . "." . $4>xe)'
+    ) || return
+    if [ -z "${predicted_version}" ]; then
+        cat >&2 <<EOF
+error: unexpected 'git describe' result on Flutter commit in pubspec.yaml
+Commit ${flutter_commit} was described as: ${commit_described}
+EOF
+        return 1
+    fi
+    if [ "${flutter_version}" != "${predicted_version}" ]; then
+        cat >&2 <<EOF
+error: Flutter commit in pubspec.yaml seems to differ from version bound
+Commit ${flutter_commit} was described as: ${commit_described}
+We therefore expect the Flutter version name to be: ${predicted_version}
+But the Flutter version bound in pubspec.yaml is: ${flutter_version}
+EOF
+        return 1
+    fi
+
+    # Check the commit is an acceptable commit.
+    local commit_count
+    commit_count=$(
+        "${flutter_git[@]}" rev-list --count origin/main.."${flutter_commit}"
+    ) || return
+    if (( "${commit_count}" )); then
+        cat >&2 <<EOF
+error: Flutter commit spec in pubspec.yaml is not from upstream main.
+Commit ${flutter_commit} has ${commit_count} commits not in main:
+EOF
+        "${flutter_git[@]}" log --oneline --reverse \
+            origin/main.."${flutter_commit}"
+        return 1
+    fi
+
+    if_verbose echo "OK Flutter ${flutter_version} aka ${flutter_commit}"
+
+    return 0
+}
+
 # Whether the build_runner suite should run, given $opt_files.
 should_run_build_runner() {
     # First, check for changes in relevant metadata.
@@ -214,7 +315,7 @@ should_run_build_runner() {
     # (And at this point we must have a meaningful $files_base_commit.)
     if git_changed_files "${files_base_commit}" \
             | xargs -r git grep -l '^part .*g\.dart.;$' \
-            | grep -q .; then
+            | grep_quiet_hungry .; then
         return 0
     fi
 
@@ -249,18 +350,46 @@ run_build_runner() {
         || return
     fi
 
+    # When run in a fresh worktree -- so in particular in CI --
+    # `build_runner build --delete-conflicting-outputs` will
+    # delete other `*.g.dart` files that don't belong to it.
+    # Put them back.
+    git restore -s @ lib/host/'*'.g.dart
+
     check_no_changes "updates to *.g.dart files" '*.g.dart'
+}
+
+run_l10n() {
+    local output_pathspec=lib/generated/l10n/zulip_localizations'*'.dart
+
+    # Omitted from this check:
+    #   pubspec.{yaml,lock} tools/check
+    files_check l10n.yaml assets/l10n/ "${output_pathspec}" \
+    || return 0
+
+    check_no_uncommitted_or_untracked "${output_pathspec}" \
+    || return
+
+    rm -f lib/generated/l10n/zulip_localizations_*.dart \
+    || return
+
+    flutter gen-l10n > /dev/null \
+    || return
+
+    check_no_changes "updates to l10n" "${output_pathspec}"
 }
 
 run_drift() {
     local schema_dir=test/model/schemas/
+    local migration_helper_path=lib/model/schema_versions.g.dart
+    local outputs=( "${schema_dir}" "${migration_helper_path}" )
 
     # Omitted from this check:
     #   pubspec.{yaml,lock} tools/check
-    files_check lib/model/database{,.g}.dart "${schema_dir}" \
+    files_check lib/model/database{,.g}.dart "${outputs[@]}" \
     || return 0
 
-    check_no_uncommitted_or_untracked "${schema_dir}" \
+    check_no_uncommitted_or_untracked "${outputs[@]}" \
     || return
 
     dart run drift_dev schema dump \
@@ -269,8 +398,50 @@ run_drift() {
     dart run drift_dev schema generate --data-classes --companions \
         "${schema_dir}" "${schema_dir}" \
     || return
+    dart run drift_dev schema steps \
+        "${schema_dir}" "${migration_helper_path}" \
+    || return
 
-    check_no_changes "schema updates" "${schema_dir}"
+    check_no_changes "schema or migration-helper updates" "${outputs[@]}"
+}
+
+filter_flutter_pub_run_output() {
+    # `flutter pub run` prints this deprecation message...
+    # but then it runs much, much faster than `dart run`.
+    # (The latter prints messages about compiling the library afresh
+    # each time, which might point to the cause of the problem.)
+    # TODO(upstream): Find or file a bug about `flutter pub run` vs. `dart run`.
+
+    # For completeness we give this nice specific grep, but in fact
+    # just `cat` would solve the problem too: it seems that once the
+    # output isn't a terminal, `flutter pub run` skips the deprecation
+    # notice as well as a few chatty other messages.
+
+    # shellcheck disable=SC2016  # yes, the backticks are literal
+    grep -vxF 'Deprecated. Use `dart run` instead.'
+}
+
+run_pigeon() {
+    # Git pathspecs for files our pigeons may emit.
+    local outputs=(
+        lib/host/'*'.g.dart
+        android/'*'.g.kt
+    )
+
+    # Omitted from this check:
+    #   pubspec.{yaml,lock} tools/check
+    files_check pigeon/ "${outputs[@]}" \
+    || return 0
+
+    check_no_uncommitted_or_untracked "${outputs[@]}" \
+    || return
+
+    git ls-files pigeon/ \
+    | xargs -rn1 flutter pub run pigeon --input \
+        > >(filter_flutter_pub_run_output) \
+    || return
+
+    check_no_changes "changes to pigeons" "${outputs[@]}"
 }
 
 run_icons() {
@@ -287,6 +458,27 @@ run_icons() {
     tools/icons/build-icon-font
 
     check_no_changes "icon updates" "${outputs[@]}"
+}
+
+run_android() {
+    # Omitted from this check:
+    #   pubspec.{yaml,lock} tools/check
+    files_check android/ \
+    || return 0
+
+    # This causes `android/gradlew` to exist, for `tools/gradle` to use.
+    flutter build apk --config-only \
+    || return
+
+    # For docs on this Android linter:
+    #   https://developer.android.com/studio/write/lint
+    tools/gradle -q :app:lint \
+    || return
+
+    flutter build apk \
+    || return
+
+    flutter build appbundle
 }
 
 run_shellcheck() {
@@ -332,8 +524,6 @@ describe_git_head() {
 }
 
 print_header() {
-    local flutter_executable flutter_tree
-
     echo "Test command: ${orig_cmdline}"
 
     echo "Time now: $(date --utc +'%F %T %z')"
@@ -343,9 +533,7 @@ print_header() {
     # We avoid `flutter --version` because, weirdly, when run in a
     # GitHub Actions step it takes about 30 seconds.  (The first time;
     # it's fast subsequent times.)  That's even after `flutter precache`.
-    flutter_executable=$(readlink -f "$(type -p flutter)")
-    flutter_tree=${flutter_executable%/bin/flutter}
-    describe_git_head "flutter/flutter" "${flutter_tree}"/.git
+    describe_git_head "flutter/flutter" "$(flutter_tree)"/.git
 
     dart --version
 }
@@ -358,9 +546,13 @@ for suite in "${opt_suites[@]}"; do
     case "$suite" in
         analyze)      run_analyze ;;
         test)         run_test ;;
+        flutter_version) run_flutter_version ;;
         build_runner) run_build_runner ;;
+        l10n)         run_l10n ;;
         drift)        run_drift ;;
+        pigeon)       run_pigeon ;;
         icons)        run_icons ;;
+        android)      run_android ;;
         shellcheck)   run_shellcheck ;;
         *)            echo >&2 "Internal error: unknown suite $suite" ;;
     esac || failed+=( "$suite" )

@@ -3,11 +3,14 @@
 /// Use this file for types in the Dart SDK, as well as in other
 /// packages published by the Dart team that function as
 /// part of the Dart standard library.
+library;
 
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:checks/checks.dart';
 import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart';
 
 extension ListChecks<T> on Subject<List<T>> {
   Subject<T> operator [](int index) => has((l) => l[index], '[$index]');
@@ -21,6 +24,10 @@ extension NullableMapChecks<K, V> on Subject<Map<K, V>?> {
       return isNotNull().deepEquals(expected);
     }
   }
+}
+
+extension ErrorChecks on Subject<Error> {
+  Subject<String> get asString => has((x) => x.toString(), 'toString'); // TODO(checks): what's a good convention for this?
 }
 
 /// Convert [object] to a pure JSON-like value.
@@ -61,11 +68,15 @@ Object? deepToJson(Object? object) {
     case List():
       result = object.map((x) => deepToJson(x)).toList();
     case Map() when object.keys.every((k) => k is String):
-      result = object.map((k, v) => MapEntry<String, dynamic>(k, deepToJson(v)));
+      result = object.map((k, v) => MapEntry<String, dynamic>(k as String, deepToJson(v)));
     default:
       return (null, false);
   }
   return (result, true);
+}
+
+extension CompleterChecks<T> on Subject<Completer<T>> {
+  Subject<bool> get isCompleted => has((x) => x.isCompleted, 'isCompleted');
 }
 
 extension JsonChecks on Subject<Object?> {
@@ -81,9 +92,9 @@ extension JsonChecks on Subject<Object?> {
       case null || bool() || String() || num():
         return actualJson.equals(expectedJson);
       case List():
-        return actualJson.isA<List>().deepEquals(expectedJson);
+        return actualJson.isA<List<dynamic>>().deepEquals(expectedJson);
       case Map():
-        return actualJson.isA<Map>().deepEquals(expectedJson);
+        return actualJson.isA<Map<dynamic, dynamic>>().deepEquals(expectedJson);
       case _:
         assert(false);
     }
@@ -135,6 +146,10 @@ extension HttpMultipartFileChecks on Subject<http.MultipartFile> {
   Subject<String> get field => has((f) => f.field, 'field');
   Subject<int> get length => has((f) => f.length, 'length');
   Subject<String?> get filename => has((f) => f.filename, 'filename');
-  // TODO Subject<MediaType> get contentType => has((f) => f.contentType, 'contentType');
+  Subject<MediaType> get contentType => has((f) => f.contentType, 'contentType');
   Subject<bool> get isFinalized => has((f) => f.isFinalized, 'isFinalized');
+}
+
+extension MediaTypeChecks on Subject<MediaType> {
+  Subject<String> get asString => has((x) => x.toString(), 'toString'); // TODO(checks): what's a good convention for this?
 }

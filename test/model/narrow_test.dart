@@ -27,7 +27,7 @@ void main() {
       final stream = eg.stream();
       final message = eg.streamMessage(stream: stream);
       final actual = TopicNarrow.ofMessage(message);
-      check(actual).equals(TopicNarrow(stream.streamId, message.subject));
+      check(actual).equals(TopicNarrow(stream.streamId, message.topic));
     });
   });
 
@@ -36,10 +36,10 @@ void main() {
       check(() => DmNarrow(allRecipientIds: [2, 12], selfUserId: 2)).returnsNormally();
       check(() => DmNarrow(allRecipientIds: [2],     selfUserId: 2)).returnsNormally();
 
-      check(() => DmNarrow(allRecipientIds: [12, 2], selfUserId: 2)).throws();
-      check(() => DmNarrow(allRecipientIds: [2, 2],  selfUserId: 2)).throws();
-      check(() => DmNarrow(allRecipientIds: [2, 12], selfUserId: 1)).throws();
-      check(() => DmNarrow(allRecipientIds: [],      selfUserId: 2)).throws();
+      check(() => DmNarrow(allRecipientIds: [12, 2], selfUserId: 2)).throws<void>();
+      check(() => DmNarrow(allRecipientIds: [2, 2],  selfUserId: 2)).throws<void>();
+      check(() => DmNarrow(allRecipientIds: [2, 12], selfUserId: 1)).throws<void>();
+      check(() => DmNarrow(allRecipientIds: [],      selfUserId: 2)).throws<void>();
     });
 
     test('ofMessage: self-dm', () {
@@ -147,6 +147,30 @@ void main() {
       check(narrow123.containsMessage(dm(user1, [user2, user3]))).isTrue();
       check(narrow123.containsMessage(dm(user2, [user1, user3]))).isTrue();
       check(narrow123.containsMessage(dm(user3, [user1, user2]))).isTrue();
+    });
+  });
+
+  group('MentionsNarrow', () {
+    test('containsMessage', () {
+      const narrow = MentionsNarrow();
+
+      check(narrow.containsMessage(
+        eg.streamMessage(flags: []))).isFalse();
+      check(narrow.containsMessage(
+        eg.streamMessage(flags:[MessageFlag.mentioned]))).isTrue();
+      check(narrow.containsMessage(
+        eg.streamMessage(flags: [MessageFlag.wildcardMentioned]))).isTrue();
+    });
+  });
+
+  group('StarredMessagesNarrow', () {
+    test('containsMessage', () {
+      const narrow = StarredMessagesNarrow();
+
+      check(narrow.containsMessage(
+        eg.streamMessage(flags: []))).isFalse();
+      check(narrow.containsMessage(
+        eg.streamMessage(flags:[MessageFlag.starred]))).isTrue();
     });
   });
 }
