@@ -1,19 +1,27 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
-import 'package:flutter_gen/gen_l10n/zulip_localizations.dart';
 
+import '../api/model/initial_snapshot.dart';
 import '../api/model/model.dart';
+import '../generated/l10n/zulip_localizations.dart';
 import '../model/content.dart';
 import '../model/narrow.dart';
+import '../model/store.dart';
+import 'app_bar.dart';
 import 'content.dart';
 import 'message_list.dart';
 import 'page.dart';
 import 'store.dart';
+import 'text.dart';
 
 class _TextStyles {
   static const primaryFieldText = TextStyle(fontSize: 20);
-  static const customProfileFieldLabel = TextStyle(fontSize: 15, fontWeight: FontWeight.bold);
+
+  static TextStyle customProfileFieldLabel(BuildContext context) =>
+    const TextStyle(fontSize: 15)
+      .merge(weightVariableTextStyle(context, wght: 700));
+
   static const customProfileFieldText = TextStyle(fontSize: 15);
 }
 
@@ -22,28 +30,61 @@ class ProfilePage extends StatelessWidget {
 
   final int userId;
 
-  static Route<void> buildRoute({required BuildContext context, required int userId}) {
-    return MaterialAccountWidgetRoute(context: context,
+  static AccountRoute<void> buildRoute({int? accountId, BuildContext? context,
+      required int userId}) {
+    return MaterialAccountWidgetRoute(accountId: accountId, context: context,
       page: ProfilePage(userId: userId));
+  }
+
+  /// The given user's real email address, if known, for displaying in the UI.
+  ///
+  /// Returns null if self-user isn't able to see [user]'s real email address.
+  String? _getDisplayEmailFor(User user, {required PerAccountStore store}) {
+    if (store.zulipFeatureLevel >= 163) { // TODO(server-7)
+      // A non-null value means self-user has access to [user]'s real email,
+      // while a null value means it doesn't have access to the email.
+      // Search for "delivery_email" in https://zulip.com/api/register-queue.
+      return user.deliveryEmail;
+    } else {
+      if (user.deliveryEmail != null) {
+        // A non-null value means self-user has access to [user]'s real email,
+        // while a null value doesn't necessarily mean it doesn't have access
+        // to the email, ....
+        return user.deliveryEmail;
+      } else if (store.emailAddressVisibility == EmailAddressVisibility.everyone) {
+        // ... we have to also check for [PerAccountStore.emailAddressVisibility].
+        // See:
+        //   * https://github.com/zulip/zulip-mobile/pull/5515#discussion_r997731727
+        //   * https://chat.zulip.org/#narrow/stream/378-api-design/topic/email.20address.20visibility/near/1296133
+        return user.email;
+      } else {
+        return null;
+      }
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     final zulipLocalizations = ZulipLocalizations.of(context);
     final store = PerAccountStoreWidget.of(context);
-    final user = store.users[userId];
+    final user = store.getUser(userId);
     if (user == null) {
       return const _ProfileErrorPage();
     }
 
+    final displayEmail = _getDisplayEmailFor(user, store: store);
     final items = [
       Center(
         child: Avatar(userId: userId, size: 200, borderRadius: 200 / 8)),
       const SizedBox(height: 16),
       Text(user.fullName,
         textAlign: TextAlign.center,
-        style: _TextStyles.primaryFieldText.merge(const TextStyle(fontWeight: FontWeight.bold))),
-      // TODO(#291) render email field
+        style: _TextStyles.primaryFieldText
+          .merge(weightVariableTextStyle(context, wght: 700))),
+      if (displayEmail != null)
+        Text(displayEmail,
+          textAlign: TextAlign.center,
+          style: _TextStyles.primaryFieldText),
       Text(roleToLabel(user.role, zulipLocalizations),
         textAlign: TextAlign.center,
         style: _TextStyles.primaryFieldText),
@@ -56,13 +97,13 @@ class ProfilePage extends StatelessWidget {
       FilledButton.icon(
         onPressed: () => Navigator.push(context,
           MessageListPage.buildRoute(context: context,
-            narrow: DmNarrow.withUser(userId, selfUserId: store.account.userId))),
+            narrow: DmNarrow.withUser(userId, selfUserId: store.selfUserId))),
         icon: const Icon(Icons.email),
         label: Text(zulipLocalizations.profileButtonSendDirectMessage)),
     ];
 
     return Scaffold(
-      appBar: AppBar(title: Text(user.fullName)),
+      appBar: ZulipAppBar(title: Text(user.fullName)),
       body: SingleChildScrollView(
         child: Center(
           child: ConstrainedBox(
@@ -80,17 +121,18 @@ class _ProfileErrorPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final zulipLocalizations = ZulipLocalizations.of(context);
     return Scaffold(
-      appBar: AppBar(title: const Text('Error')),
-      body: const SingleChildScrollView(
+      appBar: ZulipAppBar(title: Text(zulipLocalizations.errorDialogTitle)),
+      body: SingleChildScrollView(
         child: Padding(
-          padding: EdgeInsets.symmetric(horizontal: 16, vertical: 32),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 32),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(Icons.error),
-              SizedBox(width: 4),
-              Text('Could not show user profile.'),
+              const Icon(Icons.error),
+              const SizedBox(width: 4),
+              Text(zulipLocalizations.errorCouldNotShowUserProfile),
             ]))));
   }
 }
@@ -113,7 +155,7 @@ class _ProfileDataTable extends StatelessWidget {
 
   static T? _tryDecode<T, U>(T Function(U) fromJson, String data) {
     try {
-      return fromJson(jsonDecode(data));
+      return fromJson(jsonDecode(data) as U);
     } on FormatException {
       return null;
     } on TypeError {
@@ -158,7 +200,7 @@ class _ProfileDataTable extends StatelessWidget {
         // TODO(server): The value's format is undocumented, but empirically
         //   it's a date in ISO format, like 2000-01-01.
         // That's readable as is, but:
-        // TODO format this date using user's locale.
+        // TODO(i18n) format this date using user's locale.
         return _TextWidget(text: value);
 
       case CustomProfileFieldType.shortText:
@@ -188,10 +230,11 @@ class _ProfileDataTable extends StatelessWidget {
 
       items.add(Row(
         crossAxisAlignment: CrossAxisAlignment.baseline,
-        textBaseline: TextBaseline.alphabetic,
+        textBaseline: localizedTextBaseline(context),
         children: [
-          SizedBox(width: 96,
-            child: Text(realmField.name, style: _TextStyles.customProfileFieldLabel)),
+          SizedBox(width: 100,
+            child: Text(style: _TextStyles.customProfileFieldLabel(context),
+              realmField.name)),
           const SizedBox(width: 8),
           Flexible(child: widget),
         ]));
@@ -216,7 +259,9 @@ class _LinkWidget extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final linkNode = LinkNode(url: url, nodes: [TextNode(text)]);
-    final paragraph = Paragraph(node: ParagraphNode(nodes: [linkNode], links: [linkNode]));
+    final paragraph = DefaultTextStyle(
+      style: ContentTheme.of(context).textStylePlainParagraph,
+      child: Paragraph(node: ParagraphNode(nodes: [linkNode], links: [linkNode])));
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 8),
       child: MouseRegion(
@@ -246,8 +291,6 @@ class _UserWidget extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final store = PerAccountStoreWidget.of(context);
-    final user = store.users[userId];
-    final fullName = user?.fullName ?? '(unknown user)';
     return InkWell(
       onTap: () => Navigator.push(context,
         ProfilePage.buildRoute(context: context,
@@ -255,9 +298,12 @@ class _UserWidget extends StatelessWidget {
       child: Padding(
         padding: const EdgeInsets.all(8),
         child: Row(children: [
+          // TODO(#196) render active status
           Avatar(userId: userId, size: 32, borderRadius: 32 / 8),
           const SizedBox(width: 8),
-          Expanded(child: Text(fullName, style: _TextStyles.customProfileFieldText)), // TODO(#196) render active status
+          Expanded(
+            child: Text(store.userDisplayName(userId),
+              style: _TextStyles.customProfileFieldText)),
         ])));
   }
 }

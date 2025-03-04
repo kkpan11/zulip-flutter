@@ -1,4 +1,47 @@
+import 'package:json_annotation/json_annotation.dart';
+
+import 'model.dart';
+
+part 'narrow.g.dart';
+
 typedef ApiNarrow = List<ApiNarrowElement>;
+
+/// Adapt the given narrow to be sent to the given Zulip server version.
+///
+/// Any elements that take a different name on old vs. new servers
+/// will be resolved to the specific name to use.
+/// Any elements that are unknown to old servers and can
+/// reasonably be omitted will be omitted.
+ApiNarrow resolveApiNarrowForServer(ApiNarrow narrow, int zulipFeatureLevel) {
+  final supportsOperatorDm = zulipFeatureLevel >= 177; // TODO(server-7)
+  final supportsOperatorWith = zulipFeatureLevel >= 271; // TODO(server-9)
+
+  bool hasDmElement = false;
+  bool hasWithElement = false;
+  for (final element in narrow) {
+    switch (element) {
+      case ApiNarrowDm():   hasDmElement = true;
+      case ApiNarrowWith(): hasWithElement = true;
+      default:
+    }
+  }
+  if (!(hasDmElement || (hasWithElement && !supportsOperatorWith))) {
+    return narrow;
+  }
+
+  final result = <ApiNarrowElement>[];
+  for (final element in narrow) {
+    switch (element) {
+      case ApiNarrowDm():
+        result.add(element.resolve(legacy: !supportsOperatorDm));
+      case ApiNarrowWith() when !supportsOperatorWith:
+        break; // drop unsupported element
+      default:
+        result.add(element);
+    }
+  }
+  return result;
+}
 
 /// An element in the list representing a narrow in the Zulip API.
 ///
@@ -8,7 +51,37 @@ typedef ApiNarrow = List<ApiNarrowElement>;
 /// please add more as needed.
 sealed class ApiNarrowElement {
   String get operator;
-  Object get operand;
+
+  /// The operand of this narrow filter.
+  ///
+  /// The base-class getter [ApiNarrowElement.operand] returns `dynamic`,
+  /// and its value should only be used for encoding as JSON, for use in a
+  /// request to the Zulip server.
+  ///
+  /// For any operations that depend more specifically on the operand's type,
+  /// do not use run-time type checks on the value of [operand]; instead, make
+  /// a run-time type check (e.g. with `switch`) on the [ApiNarrowElement]
+  /// itself, and use the [operand] getter of the specific subtype.
+  ///
+  /// That makes a difference because [ApiNarrowTopic.operand] has type
+  /// [TopicName]; at runtime a [TopicName] is indistinguishable from [String],
+  /// but an [ApiNarrowTopic] can still be distinguished from other subclasses.
+  //
+  // We can't just write [Object] here; if we do, the compiler rejects the
+  // override in ApiNarrowTopic because TopicName can't be assigned to Object.
+  // The reason that could be bad is that a caller of [ApiNarrowElement.operand]
+  // could take the result and call Object members on it, like toString, even
+  // though TopicName doesn't declare those members.
+  //
+  // In this case that's fine because the only plausible thing to do with
+  // a generic [ApiNarrowElement.operand] is to encode it as JSON anyway,
+  // which behaves just fine on TopicName.
+  //
+  // ... Even if it weren't fine, in the case of Object this protection is
+  // thoroughly undermined already: code that has a TopicName can call Object
+  // members on it directly.  See comments at [TopicName].
+  dynamic get operand; // see justification for `dynamic` above
+
   final bool negated;
 
   ApiNarrowElement({this.negated = false});
@@ -36,12 +109,12 @@ class ApiNarrowStream extends ApiNarrowElement {
 class ApiNarrowTopic extends ApiNarrowElement {
   @override String get operator => 'topic';
 
-  @override final String operand;
+  @override final TopicName operand;
 
   ApiNarrowTopic(this.operand, {super.negated});
 
   factory ApiNarrowTopic.fromJson(Map<String, dynamic> json) => ApiNarrowTopic(
-    json['operand'] as String,
+    TopicName.fromJson(json['operand'] as String),
     negated: json['negated'] as bool? ?? false,
   );
 }
@@ -51,6 +124,8 @@ class ApiNarrowTopic extends ApiNarrowElement {
 /// An instance directly of this class must not be serialized with [jsonEncode],
 /// and more generally its [operator] getter must not be called.
 /// Instead, call [resolve] and use the object it returns.
+///
+/// If part of [ApiNarrow] use [resolveApiNarrowForServer].
 class ApiNarrowDm extends ApiNarrowElement {
   @override String get operator {
     assert(false,
@@ -96,6 +171,62 @@ class ApiNarrowPmWith extends ApiNarrowDm {
   @override String get operator => 'pm-with';
 
   ApiNarrowPmWith._(super.operand, {super.negated});
+}
+
+/// An [ApiNarrowElement] with the 'with' operator.
+///
+/// If part of [ApiNarrow] use [resolveApiNarrowForServer].
+class ApiNarrowWith extends ApiNarrowElement {
+  @override String get operator => 'with';
+
+  @override final int operand;
+
+  ApiNarrowWith(this.operand, {super.negated});
+
+  factory ApiNarrowWith.fromJson(Map<String, dynamic> json) => ApiNarrowWith(
+    json['operand'] as int,
+    negated: json['negated'] as bool? ?? false,
+  );
+}
+
+class ApiNarrowIs extends ApiNarrowElement {
+  @override String get operator => 'is';
+
+  @override final IsOperand operand;
+
+  ApiNarrowIs(this.operand, {super.negated});
+
+  factory ApiNarrowIs.fromJson(Map<String, dynamic> json) => ApiNarrowIs(
+    IsOperand.fromRawString(json['operand'] as String),
+    negated: json['negated'] as bool? ?? false,
+  );
+}
+
+/// An operand value of "is" operator.
+///
+/// See also:
+///   - https://zulip.com/api/construct-narrow
+///   - https://zulip.com/help/search-for-messages#search-your-important-messages
+///   - https://zulip.com/help/search-for-messages#search-by-message-status
+@JsonEnum(alwaysCreate: true)
+enum IsOperand {
+  dm,        // TODO(server-7) new in FL 177
+  private,   // TODO(server-7) deprecated in FL 177, equivalent to [dm].
+  alerted,
+  mentioned,
+  starred,
+  followed,  // TODO(server-9) new in FL 265
+  resolved,
+  unread,
+  unknown;
+
+  static IsOperand fromRawString(String raw) => $enumDecode(
+    _$IsOperandEnumMap, raw, unknownValue: unknown);
+
+  @override
+  String toString() => _$IsOperandEnumMap[this]!;
+
+  String toJson() => toString();
 }
 
 class ApiNarrowMessageId extends ApiNarrowElement {

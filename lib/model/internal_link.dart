@@ -1,9 +1,11 @@
 import 'package:flutter/foundation.dart';
 import 'package:json_annotation/json_annotation.dart';
 
+import '../api/model/model.dart';
 import '../api/model/narrow.dart';
 import 'narrow.dart';
 import 'store.dart';
+import 'channel.dart';
 
 part 'internal_link.g.dart';
 
@@ -56,17 +58,14 @@ String? decodeHashComponent(String str) {
 // When you want to point the server to a location in a message list, you
 // you do so by passing the `anchor` param.
 Uri narrowLink(PerAccountStore store, Narrow narrow, {int? nearMessageId}) {
-  final apiNarrow = narrow.apiEncode();
+  // TODO(server-7)
+  final apiNarrow = resolveApiNarrowForServer(
+    narrow.apiEncode(), store.zulipFeatureLevel);
   final fragment = StringBuffer('narrow');
   for (ApiNarrowElement element in apiNarrow) {
     fragment.write('/');
     if (element.negated) {
       fragment.write('-');
-    }
-
-    if (element is ApiNarrowDm) {
-      final supportsOperatorDm = store.connection.zulipFeatureLevel! >= 177; // TODO(server-7)
-      element = element.resolve(legacy: !supportsOperatorDm);
     }
 
     fragment.write('${element.operator}/');
@@ -78,7 +77,7 @@ Uri narrowLink(PerAccountStore store, Narrow narrow, {int? nearMessageId}) {
         final slugifiedName = _encodeHashComponent(name.replaceAll(' ', '-'));
         fragment.write('$streamId-$slugifiedName');
       case ApiNarrowTopic():
-        fragment.write(_encodeHashComponent(element.operand));
+        fragment.write(_encodeHashComponent(element.operand.apiName));
       case ApiNarrowDmModern():
         final suffix = element.operand.length >= 3 ? 'group' : 'dm';
         fragment.write('${element.operand.join(',')}-$suffix');
@@ -87,6 +86,10 @@ Uri narrowLink(PerAccountStore store, Narrow narrow, {int? nearMessageId}) {
         fragment.write('${element.operand.join(',')}-$suffix');
       case ApiNarrowDm():
         assert(false, 'ApiNarrowDm should have been resolved');
+      case ApiNarrowWith():
+        fragment.write(element.operand.toString());
+      case ApiNarrowIs():
+        fragment.write(element.operand.toString());
       case ApiNarrowMessageId():
         fragment.write(element.operand.toString());
     }
@@ -96,23 +99,20 @@ Uri narrowLink(PerAccountStore store, Narrow narrow, {int? nearMessageId}) {
     fragment.write('/near/$nearMessageId');
   }
 
-  return store.account.realmUrl.replace(fragment: fragment.toString());
-}
-
-/// Create a new `Uri` object in relation to a given realmUrl.
-///
-/// Returns `null` if `urlString` could not be parsed as a `Uri`.
-Uri? tryResolveOnRealmUrl(String urlString, Uri realmUrl) {
-  try {
-    return realmUrl.resolve(urlString);
-  } on FormatException {
-    return null;
+  Uri result = store.realmUrl.replace(fragment: fragment.toString());
+  if (result.path.isEmpty) {
+    // Always ensure that there is a '/' right after the hostname.
+    // A generated URL without '/' looks odd,
+    // and if used in a Zulip message does not get automatically linkified.
+    result = result.replace(path: '/');
   }
+  return result;
 }
 
 /// A [Narrow] from a given URL, on `store`'s realm.
 ///
-/// `url` must already be passed through [tryResolveOnRealmUrl].
+/// `url` must already be a result from [PerAccountStore.tryResolveUrl]
+/// on `store`.
 ///
 /// Returns `null` if any of the operator/operand pairs are invalid.
 ///
@@ -125,7 +125,7 @@ Uri? tryResolveOnRealmUrl(String urlString, Uri realmUrl) {
 ///   #narrow/stream/1-announce/stream/1-announce (duplicated operator)
 // TODO(#252): handle all valid narrow links, returning a search narrow
 Narrow? parseInternalLink(Uri url, PerAccountStore store) {
-  if (!_isInternalLink(url, store.account.realmUrl)) return null;
+  if (!_isInternalLink(url, store.realmUrl)) return null;
 
   final (category, segments) = _getCategoryAndSegmentsFromFragment(url.fragment);
   switch (category) {
@@ -162,6 +162,8 @@ Narrow? _interpretNarrowSegments(List<String> segments, PerAccountStore store) {
   ApiNarrowStream? streamElement;
   ApiNarrowTopic? topicElement;
   ApiNarrowDm? dmElement;
+  ApiNarrowWith? withElement;
+  Set<IsOperand> isElementOperands = {};
 
   for (var i = 0; i < segments.length; i += 2) {
     final (operator, negated) = _parseOperator(segments[i]);
@@ -169,6 +171,7 @@ Narrow? _interpretNarrowSegments(List<String> segments, PerAccountStore store) {
     final operand = segments[i + 1];
     switch (operator) {
       case _NarrowOperator.stream:
+      case _NarrowOperator.channel:
         if (streamElement != null) return null;
         final streamId = _parseStreamOperand(operand, store);
         if (streamId == null) return null;
@@ -179,7 +182,7 @@ Narrow? _interpretNarrowSegments(List<String> segments, PerAccountStore store) {
         if (topicElement != null) return null;
         final String? topic = decodeHashComponent(operand);
         if (topic == null) return null;
-        topicElement = ApiNarrowTopic(topic, negated: negated);
+        topicElement = ApiNarrowTopic(TopicName(topic), negated: negated);
 
       case _NarrowOperator.dm:
       case _NarrowOperator.pmWith:
@@ -188,23 +191,53 @@ Narrow? _interpretNarrowSegments(List<String> segments, PerAccountStore store) {
         if (dmIds == null) return null;
         dmElement = ApiNarrowDm(dmIds, negated: negated);
 
-      case _NarrowOperator.near:
-        continue; // TODO(#82): support for near
+      case _NarrowOperator.with_:
+        if (withElement != null) return null;
+        final messageId = int.tryParse(operand, radix: 10);
+        if (messageId == null) return null;
+        withElement = ApiNarrowWith(messageId);
+
+      case _NarrowOperator.is_:
+        // It is fine to have duplicates of the same [IsOperand].
+        isElementOperands.add(IsOperand.fromRawString(operand));
+
+      case _NarrowOperator.near: // TODO(#82): support for near
+        continue;
 
       case _NarrowOperator.unknown:
         return null;
     }
   }
 
-  if (dmElement != null) {
-    if (streamElement != null || topicElement != null) return null;
-    return DmNarrow.withUsers(dmElement.operand, selfUserId: store.account.userId);
+  if (isElementOperands.isNotEmpty) {
+    if (streamElement != null || topicElement != null || dmElement != null || withElement != null) {
+      return null;
+    }
+    if (isElementOperands.length > 1) return null;
+    switch (isElementOperands.single) {
+      case IsOperand.mentioned:
+        return const MentionsNarrow();
+      case IsOperand.starred:
+        return const StarredMessagesNarrow();
+      case IsOperand.dm:
+      case IsOperand.private:
+      case IsOperand.alerted:
+      case IsOperand.followed:
+      case IsOperand.resolved:
+      case IsOperand.unread:
+      case IsOperand.unknown:
+        return null;
+    }
+  } else if (dmElement != null) {
+    if (streamElement != null || topicElement != null || withElement != null) return null;
+    return DmNarrow.withUsers(dmElement.operand, selfUserId: store.selfUserId);
   } else if (streamElement != null) {
     final streamId = streamElement.operand;
     if (topicElement != null) {
-      return TopicNarrow(streamId, topicElement.operand);
+      return TopicNarrow(streamId, topicElement.operand, with_: withElement?.operand);
     } else {
-      return StreamNarrow(streamId);
+      if (withElement != null) return null;
+      return ChannelNarrow(streamId);
     }
   }
   return null;
@@ -215,8 +248,15 @@ enum _NarrowOperator {
   // 'dm' is new in server-7.0; means the same as 'pm-with'
   dm,
   near,
+  // cannot use `with` as it is a reserved keyword in Dart
+  @JsonValue('with')
+  with_,
+  // cannot use `is` as it is a reserved keyword in Dart
+  @JsonValue('is')
+  is_,
   pmWith,
   stream,
+  channel,
   subject,
   topic,
   unknown;
@@ -249,7 +289,7 @@ enum _NarrowOperator {
 ///
 /// Returns null if the operand has an unexpected shape, or has the old shape
 /// (stream name but no ID) and we don't know of a stream by the given name.
-int? _parseStreamOperand(String operand, PerAccountStore store) {
+int? _parseStreamOperand(String operand, ChannelStore store) {
   // "New" (2018) format: ${stream_id}-${stream_name} .
   final match = RegExp(r'^(\d+)(?:-.*)?$').firstMatch(operand);
   final newFormatStreamId = (match != null) ? int.parse(match.group(1)!, radix: 10) : null;

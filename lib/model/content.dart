@@ -1,7 +1,10 @@
+import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart';
 import 'package:html/dom.dart' as dom;
 import 'package:html/parser.dart';
 
+import '../api/model/model.dart';
+import '../api/model/submessage.dart';
 import 'code_block.dart';
 
 /// A node in a parse tree for Zulip message-style content.
@@ -71,13 +74,26 @@ mixin UnimplementedNode on ContentNode {
   }
 }
 
+/// A parsed, ready-to-render representation of Zulip message content.
+sealed class ZulipMessageContent {}
+
+/// A wrapper around a mutable representation of a Zulip poll message.
+///
+/// Consumers are expected to listen for [Poll]'s changes to receive
+/// live-updates.
+class PollContent implements ZulipMessageContent {
+  const PollContent(this.poll);
+
+  final Poll poll;
+}
+
 /// A complete parse tree for a Zulip message's content,
 /// or other complete piece of Zulip HTML content.
 ///
 /// This is a parsed representation for an entire value of [Message.content],
 /// [Stream.renderedDescription], or other text from a Zulip server that comes
 /// in the same Zulip HTML format.
-class ZulipContent extends ContentNode {
+class ZulipContent extends ContentNode implements ZulipMessageContent {
   const ZulipContent({super.debugHtmlNode, required this.nodes});
 
   final List<BlockContentNode> nodes;
@@ -98,7 +114,7 @@ class ZulipContent extends ContentNode {
 ///   <https://developer.mozilla.org/en-US/docs/Web/CSS/CSS_flow_layout/Block_and_inline_layout_in_normal_flow>
 ///
 /// Almost all nodes are either a [BlockContentNode] or an [InlineContentNode].
-abstract class BlockContentNode extends ContentNode {
+sealed class BlockContentNode extends ContentNode {
   const BlockContentNode({super.debugHtmlNode});
 }
 
@@ -113,13 +129,27 @@ class UnimplementedBlockContentNode extends BlockContentNode
   // No ==/hashCode, because htmlNode is a whole subtree.
 }
 
+class _BlockContentListNode extends DiagnosticableTree {
+  const _BlockContentListNode(this.nodes);
+
+  final List<BlockContentNode> nodes;
+
+  @override
+  String toStringShort() => 'BlockContentNode list';
+
+  @override
+  List<DiagnosticsNode> debugDescribeChildren() {
+    return nodes.map((node) => node.toDiagnosticsNode()).toList();
+  }
+}
+
 /// A block content node whose children are inline content nodes.
 ///
 /// A node of this type expects a block layout context from its parent,
 /// but provides an inline layout context for its children.
 ///
 /// See also [InlineContainerNode].
-class BlockInlineContainerNode extends BlockContentNode {
+sealed class BlockInlineContainerNode extends BlockContentNode {
   const BlockInlineContainerNode({
     super.debugHtmlNode,
     required this.links,
@@ -161,6 +191,19 @@ class LineBreakNode extends BlockContentNode {
 
   @override
   int get hashCode => 'LineBreakNode'.hashCode;
+}
+
+/// A `hr` element
+class ThematicBreakNode extends BlockContentNode {
+  const ThematicBreakNode({super.debugHtmlNode});
+
+  @override
+  bool operator ==(Object other) {
+    return other is ThematicBreakNode;
+  }
+
+  @override
+  int get hashCode => 'ThematicBreakNode'.hashCode;
 }
 
 /// A `p` element, or a place where the DOM tree logically wanted one.
@@ -208,40 +251,33 @@ class HeadingNode extends BlockInlineContainerNode {
   }
 }
 
-enum ListStyle { ordered, unordered }
+sealed class ListNode extends BlockContentNode {
+  const ListNode(this.items, {super.debugHtmlNode});
 
-class ListNode extends BlockContentNode {
-  const ListNode(this.style, this.items, {super.debugHtmlNode});
-
-  final ListStyle style;
   final List<List<BlockContentNode>> items;
-
-  @override
-  void debugFillProperties(DiagnosticPropertiesBuilder properties) {
-    super.debugFillProperties(properties);
-    properties.add(FlagProperty('ordered', value: style == ListStyle.ordered,
-      ifTrue: 'ordered', ifFalse: 'unordered'));
-  }
 
   @override
   List<DiagnosticsNode> debugDescribeChildren() {
     return items
-      .map((nodes) => _ListItemDiagnosticableNode(nodes).toDiagnosticsNode())
+      .mapIndexed((i, nodes) =>
+        _BlockContentListNode(nodes).toDiagnosticsNode(name: 'item $i'))
       .toList();
   }
 }
 
-class _ListItemDiagnosticableNode extends DiagnosticableTree {
-  _ListItemDiagnosticableNode(this.nodes);
+class UnorderedListNode extends ListNode {
+  const UnorderedListNode(super.items, {super.debugHtmlNode});
+}
 
-  final List<BlockContentNode> nodes;
+class OrderedListNode extends ListNode {
+  const OrderedListNode(super.items, {required this.start, super.debugHtmlNode});
+
+  final int start;
 
   @override
-  String toStringShort() => 'list item';
-
-  @override
-  List<DiagnosticsNode> debugDescribeChildren() {
-    return nodes.map((node) => node.toDiagnosticsNode()).toList();
+  void debugFillProperties(DiagnosticPropertiesBuilder properties) {
+    super.debugFillProperties(properties);
+    properties.add(IntProperty('start', start));
   }
 }
 
@@ -256,6 +292,21 @@ class QuotationNode extends BlockContentNode {
   }
 }
 
+class SpoilerNode extends BlockContentNode {
+  const SpoilerNode({super.debugHtmlNode, required this.header, required this.content});
+
+  final List<BlockContentNode> header;
+  final List<BlockContentNode> content;
+
+  @override
+  List<DiagnosticsNode> debugDescribeChildren() {
+    return [
+      _BlockContentListNode(header).toDiagnosticsNode(name: 'header'),
+      _BlockContentListNode(content).toDiagnosticsNode(name: 'content'),
+    ];
+  }
+}
+
 class CodeBlockNode extends BlockContentNode {
   const CodeBlockNode(this.spans, {super.debugHtmlNode});
 
@@ -267,7 +318,7 @@ class CodeBlockNode extends BlockContentNode {
   }
 }
 
-class CodeBlockSpanNode extends InlineContentNode {
+class CodeBlockSpanNode extends ContentNode {
   const CodeBlockSpanNode({super.debugHtmlNode, required this.text, required this.type});
 
   final String text;
@@ -289,27 +340,302 @@ class CodeBlockSpanNode extends InlineContentNode {
   }
 }
 
-class ImageNode extends BlockContentNode {
-  const ImageNode({super.debugHtmlNode, required this.srcUrl});
+class MathBlockNode extends BlockContentNode {
+  const MathBlockNode({super.debugHtmlNode, required this.texSource});
 
-  /// The unmodified `src` attribute for the image.
-  ///
-  /// This may be a relative URL string.  It also may not work without adding
-  /// authentication credentials to the request.
-  final String srcUrl;
+  final String texSource;
 
   @override
   bool operator ==(Object other) {
-    return other is ImageNode && other.srcUrl == srcUrl;
+    return other is MathBlockNode && other.texSource == texSource;
   }
 
   @override
-  int get hashCode => Object.hash('ImageNode', srcUrl);
+  int get hashCode => Object.hash('MathBlockNode', texSource);
+
+  @override
+  void debugFillProperties(DiagnosticPropertiesBuilder properties) {
+    super.debugFillProperties(properties);
+    properties.add(StringProperty('texSource', texSource));
+  }
+}
+
+class ImageNodeList extends BlockContentNode {
+  const ImageNodeList(this.images, {super.debugHtmlNode});
+
+  final List<ImageNode> images;
+
+  @override
+  List<DiagnosticsNode> debugDescribeChildren() {
+    return images.map((node) => node.toDiagnosticsNode()).toList();
+  }
+}
+
+class ImageNode extends BlockContentNode {
+  const ImageNode({
+    super.debugHtmlNode,
+    required this.srcUrl,
+    required this.thumbnailUrl,
+    required this.loading,
+    required this.originalWidth,
+    required this.originalHeight,
+  });
+
+  /// The canonical source URL of the image.
+  ///
+  /// This may be a relative URL string. It also may not work without adding
+  /// authentication credentials to the request.
+  final String srcUrl;
+
+  /// The thumbnail URL of the image.
+  ///
+  /// This may be a relative URL string. It also may not work without adding
+  /// authentication credentials to the request.
+  ///
+  /// This will be null if the server hasn't yet generated a thumbnail,
+  /// or is a version that doesn't offer thumbnails.
+  /// It will also be null when [loading] is true.
+  final String? thumbnailUrl;
+
+  /// A flag to indicate whether to show the placeholder.
+  ///
+  /// Typically it will be `true` while Server is generating thumbnails.
+  final bool loading;
+
+  /// The width of the canonical image.
+  final double? originalWidth;
+
+  /// The height of the canonical image.
+  final double? originalHeight;
+
+  @override
+  bool operator ==(Object other) {
+    return other is ImageNode
+      && other.srcUrl == srcUrl
+      && other.thumbnailUrl == thumbnailUrl
+      && other.loading == loading
+      && other.originalWidth == originalWidth
+      && other.originalHeight == originalHeight;
+  }
+
+  @override
+  int get hashCode => Object.hash('ImageNode',
+    srcUrl, thumbnailUrl, loading, originalWidth, originalHeight);
 
   @override
   void debugFillProperties(DiagnosticPropertiesBuilder properties) {
     super.debugFillProperties(properties);
     properties.add(StringProperty('srcUrl', srcUrl));
+    properties.add(StringProperty('thumbnailUrl', thumbnailUrl));
+    properties.add(FlagProperty('loading', value: loading, ifTrue: "is loading"));
+    properties.add(DoubleProperty('originalWidth', originalWidth));
+    properties.add(DoubleProperty('originalHeight', originalHeight));
+  }
+}
+
+class InlineVideoNode extends BlockContentNode {
+  const InlineVideoNode({
+    super.debugHtmlNode,
+    required this.srcUrl,
+  });
+
+  /// A URL string for the video resource, on the Zulip server.
+  ///
+  /// This may be a relative URL string.  It also may not work without adding
+  /// authentication credentials to the request.
+  ///
+  /// Unlike [EmbedVideoNode.hrefUrl], this should always be a URL served by
+  /// either the Zulip server itself or a service it trusts.  It's therefore
+  /// fine from a privacy perspective to eagerly request data from this resource
+  /// when the user passively scrolls the video into view.
+  final String srcUrl;
+
+  @override
+  bool operator ==(Object other) {
+    return other is InlineVideoNode
+      && other.srcUrl == srcUrl;
+  }
+
+  @override
+  int get hashCode => Object.hash('InlineVideoNode', srcUrl);
+
+  @override
+  void debugFillProperties(DiagnosticPropertiesBuilder properties) {
+    super.debugFillProperties(properties);
+    properties.add(StringProperty('srcUrl', srcUrl));
+  }
+}
+
+class EmbedVideoNode extends BlockContentNode {
+  const EmbedVideoNode({
+    super.debugHtmlNode,
+    required this.hrefUrl,
+    required this.previewImageSrcUrl,
+  });
+
+  /// A URL string for the video, typically on an external service.
+  ///
+  /// For example, this URL may be on youtube.com or vimeo.com.
+  ///
+  /// Unlike with [previewImageSrcUrl] or [InlineVideoNode.srcUrl],
+  /// no requests should be made to this URL unless the user explicitly chooses
+  /// to interact with the video, in order to protect the user's privacy.
+  final String hrefUrl;
+
+  /// A URL string for a thumbnail image for the video, on the Zulip server.
+  ///
+  /// This may be a relative URL string.  It also may not work without adding
+  /// authentication credentials to the request.
+  ///
+  /// Like [InlineVideoNode.srcUrl] and unlike [hrefUrl], this is suitable
+  /// from a privacy perspective for eagerly fetching data when the user
+  /// passively scrolls the video into view.
+  final String previewImageSrcUrl;
+
+  @override
+  bool operator ==(Object other) {
+    return other is EmbedVideoNode
+      && other.hrefUrl == hrefUrl
+      && other.previewImageSrcUrl == previewImageSrcUrl;
+  }
+
+  @override
+  int get hashCode => Object.hash('EmbedVideoNode', hrefUrl, previewImageSrcUrl);
+
+  @override
+  void debugFillProperties(DiagnosticPropertiesBuilder properties) {
+    super.debugFillProperties(properties);
+    properties.add(StringProperty('hrefUrl', hrefUrl));
+    properties.add(StringProperty('previewImageSrcUrl', previewImageSrcUrl));
+  }
+}
+
+// See:
+//  https://ogp.me/
+//  https://oembed.com/
+//  https://zulip.com/help/image-video-and-website-previews#configure-whether-website-previews-are-shown
+class WebsitePreviewNode extends BlockContentNode {
+  const WebsitePreviewNode({
+    super.debugHtmlNode,
+    required this.hrefUrl,
+    required this.imageSrcUrl,
+    required this.title,
+    required this.description,
+  });
+
+  /// The URL from which this preview data was retrieved.
+  final String hrefUrl;
+
+  /// The image URL representing the webpage, content value
+  /// of `og:image` HTML meta property.
+  final String imageSrcUrl;
+
+  /// Represents the webpage title, derived from either
+  /// the content of the `og:title` HTML meta property or
+  /// the <title> HTML element.
+  final String? title;
+
+  /// Description about the webpage, content value of
+  /// `og:description` HTML meta property.
+  final String? description;
+
+  @override
+  bool operator ==(Object other) {
+    return other is WebsitePreviewNode
+      && other.hrefUrl == hrefUrl
+      && other.imageSrcUrl == imageSrcUrl
+      && other.title == title
+      && other.description == description;
+  }
+
+  @override
+  int get hashCode =>
+    Object.hash('WebsitePreviewNode', hrefUrl, imageSrcUrl, title, description);
+
+  @override
+  void debugFillProperties(DiagnosticPropertiesBuilder properties) {
+    super.debugFillProperties(properties);
+    properties.add(StringProperty('hrefUrl', hrefUrl));
+    properties.add(StringProperty('imageSrcUrl', imageSrcUrl));
+    properties.add(StringProperty('title', title));
+    properties.add(StringProperty('description', description));
+  }
+}
+
+class TableNode extends BlockContentNode {
+  const TableNode({super.debugHtmlNode, required this.rows});
+
+  final List<TableRowNode> rows;
+
+  @override
+  List<DiagnosticsNode> debugDescribeChildren() {
+    return rows
+      .mapIndexed((i, row) => row.toDiagnosticsNode(name: 'row $i'))
+      .toList();
+  }
+}
+
+class TableRowNode extends BlockContentNode {
+  const TableRowNode({
+    super.debugHtmlNode,
+    required this.cells,
+    required this.isHeader,
+  });
+
+  final List<TableCellNode> cells;
+
+  /// Indicates whether this row is the header row.
+  final bool isHeader;
+
+  @override
+  void debugFillProperties(DiagnosticPropertiesBuilder properties) {
+    super.debugFillProperties(properties);
+    properties.add(FlagProperty('isHeader', value: isHeader, ifTrue: "is header"));
+  }
+
+  @override
+  List<DiagnosticsNode> debugDescribeChildren() {
+    return cells
+      .mapIndexed((i, cell) => cell.toDiagnosticsNode(name: 'cell $i'))
+      .toList();
+  }
+}
+
+// The text-alignment setting that applies to a cell's column, from the delimiter row.
+//
+// See GitHub-flavored Markdown:
+//   https://github.github.com/gfm/#tables-extension-
+enum TableColumnTextAlignment {
+  /// All cells' text left-aligned, represented in Markdown as `|: --- |`.
+  left, // TODO(i18n) RTL issues? https://github.com/zulip/zulip/issues/32265
+  /// All cells' text center-aligned, represented in Markdown as `|: --- :|`.
+  center,
+  /// All cells' text right-aligned, represented in Markdown as `| --- :|`.
+  right, // TODO(i18n) RTL issues? https://github.com/zulip/zulip/issues/32265
+  /// Cells' text aligned the default way, represented in Markdown as `| --- |`.
+  defaults
+}
+
+class TableCellNode extends BlockInlineContainerNode {
+  const TableCellNode({
+    super.debugHtmlNode,
+    required super.nodes,
+    required super.links,
+    required this.textAlignment,
+  });
+
+  /// The table column text-alignment to be used for this cell.
+  // In Markdown, alignment is defined per column using the delimiter row.
+  // However, the generated HTML specifies alignment for each cell in a row
+  // individually, that matches the UI widget implementation which is also
+  // row based and needs alignment information to be per cell.
+  final TableColumnTextAlignment textAlignment;
+
+  @override
+  void debugFillProperties(DiagnosticPropertiesBuilder properties) {
+    super.debugFillProperties(properties);
+    properties.add(EnumProperty('textAlignment', textAlignment,
+      defaultValue: TableColumnTextAlignment.defaults));
   }
 }
 
@@ -324,7 +650,7 @@ class ImageNode extends BlockContentNode {
 ///   https://developer.mozilla.org/en-US/docs/Web/CSS/CSS_flow_layout/Block_and_inline_layout_in_normal_flow#elements_participating_in_an_inline_formatting_context
 ///
 /// Almost all nodes are either an [InlineContentNode] or a [BlockContentNode].
-abstract class InlineContentNode extends ContentNode {
+sealed class InlineContentNode extends ContentNode {
   const InlineContentNode({super.debugHtmlNode});
 }
 
@@ -385,7 +711,7 @@ class LineBreakInlineNode extends InlineContentNode {
 /// itself does.
 ///
 /// See also [BlockInlineContainerNode].
-abstract class InlineContainerNode extends InlineContentNode {
+sealed class InlineContainerNode extends InlineContentNode {
   const InlineContainerNode({super.debugHtmlNode, required this.nodes});
 
   final List<InlineContentNode> nodes;
@@ -400,6 +726,10 @@ abstract class InlineContainerNode extends InlineContentNode {
 
 class StrongNode extends InlineContainerNode {
   const StrongNode({super.debugHtmlNode, required super.nodes});
+}
+
+class DeletedNode extends InlineContainerNode {
+  const DeletedNode({super.debugHtmlNode, required super.nodes});
 }
 
 class EmphasisNode extends InlineContainerNode {
@@ -434,20 +764,18 @@ class UserMentionNode extends InlineContainerNode {
   const UserMentionNode({
     super.debugHtmlNode,
     required super.nodes,
-    // required this.mentionType,
-    // required this.isSilent,
   });
 
-  // We don't currently seem to need this information in code.  Instead,
+  // For the legacy design, we don't need this information in code; instead,
   // the inner text already shows how to communicate it to the user
   // (e.g., silent mentions' text lacks a leading "@"),
   // and we show that text in the same style for all types of @-mention.
-  // If we need this information in the future, go ahead and add it here.
-  //   final UserMentionType mentionType;
-  //   final bool isSilent;
+  // We'll need these for implementing the post-2023 Zulip design, though.
+  //   final UserMentionType mentionType; // TODO(#646)
+  //   final bool isSilent; // TODO(#647)
 }
 
-abstract class EmojiNode extends InlineContentNode {
+sealed class EmojiNode extends InlineContentNode {
   const EmojiNode({super.debugHtmlNode});
 }
 
@@ -493,23 +821,157 @@ class ImageEmojiNode extends EmojiNode {
   }
 }
 
-////////////////////////////////////////////////////////////////
+class MathInlineNode extends InlineContentNode {
+  const MathInlineNode({super.debugHtmlNode, required this.texSource});
 
-/// What sort of nodes a [_ZulipContentParser] is currently expecting to find.
-enum _ParserContext {
-  /// The parser is currently looking for block nodes.
-  block,
+  final String texSource;
 
-  /// The parser is currently looking for inline nodes.
-  inline,
+  @override
+  bool operator ==(Object other) {
+    return other is MathInlineNode && other.texSource == texSource;
+  }
+
+  @override
+  int get hashCode => Object.hash('MathInlineNode', texSource);
+
+  @override
+  void debugFillProperties(DiagnosticPropertiesBuilder properties) {
+    super.debugFillProperties(properties);
+    properties.add(StringProperty('texSource', texSource));
+  }
 }
 
-class _ZulipContentParser {
-  /// The current state of what sort of nodes the parser is looking for.
-  ///
-  /// This exists for the sake of debug-mode checks,
-  /// and should be read or updated only inside an assertion.
-  _ParserContext _debugParserContext = _ParserContext.block;
+class GlobalTimeNode extends InlineContentNode {
+  const GlobalTimeNode({super.debugHtmlNode, required this.datetime});
+
+  /// Always in UTC, enforced in [_ZulipInlineContentParser.parseInlineContent].
+  final DateTime datetime;
+
+  @override
+  bool operator ==(Object other) {
+    return other is GlobalTimeNode && other.datetime == datetime;
+  }
+
+  @override
+  int get hashCode => Object.hash('GlobalTimeNode', datetime);
+
+  @override
+  void debugFillProperties(DiagnosticPropertiesBuilder properties) {
+    super.debugFillProperties(properties);
+    properties.add(DiagnosticsProperty<DateTime>('datetime', datetime));
+  }
+}
+
+////////////////////////////////////////////////////////////////
+
+String? _parseMath(dom.Element element, {required bool block}) {
+  final dom.Element katexElement;
+  if (!block) {
+    assert(element.localName == 'span' && element.className == 'katex');
+
+    katexElement = element;
+  } else {
+    assert(element.localName == 'span' && element.className == 'katex-display');
+
+    if (element.nodes.length != 1) return null;
+    final child = element.nodes.single;
+    if (child is! dom.Element) return null;
+    if (child.localName != 'span') return null;
+    if (child.className != 'katex') return null;
+    katexElement = child;
+  }
+
+  // Expect two children span.katex-mathml, span.katex-html .
+  // For now we only care about the .katex-mathml .
+  if (katexElement.nodes.isEmpty) return null;
+  final child = katexElement.nodes.first;
+  if (child is! dom.Element) return null;
+  if (child.localName != 'span') return null;
+  if (child.className != 'katex-mathml') return null;
+
+  if (child.nodes.length != 1) return null;
+  final grandchild = child.nodes.single;
+  if (grandchild is! dom.Element) return null;
+  if (grandchild.localName != 'math') return null;
+  if (grandchild.attributes['display'] != (block ? 'block' : null)) return null;
+  if (grandchild.namespaceUri != 'http://www.w3.org/1998/Math/MathML') return null;
+
+  if (grandchild.nodes.length != 1) return null;
+  final greatgrand = grandchild.nodes.single;
+  if (greatgrand is! dom.Element) return null;
+  if (greatgrand.localName != 'semantics') return null;
+
+  if (greatgrand.nodes.isEmpty) return null;
+  final descendant4 = greatgrand.nodes.last;
+  if (descendant4 is! dom.Element) return null;
+  if (descendant4.localName != 'annotation') return null;
+  if (descendant4.attributes['encoding'] != 'application/x-tex') return null;
+
+  return descendant4.text.trim();
+}
+
+/// Parser for the inline-content subtrees within Zulip content HTML.
+///
+/// The only entry point to this class is [parseBlockInline].
+///
+/// After a call to [parseBlockInline] returns, the [_ZulipInlineContentParser]
+/// instance has been reset to its starting state, and can be re-used for
+/// parsing other subtrees.
+class _ZulipInlineContentParser {
+  InlineContentNode? parseInlineMath(dom.Element element) {
+    final debugHtmlNode = kDebugMode ? element : null;
+    final texSource = _parseMath(element, block: false);
+    if (texSource == null) return null;
+    return MathInlineNode(texSource: texSource, debugHtmlNode: debugHtmlNode);
+  }
+
+  UserMentionNode? parseUserMention(dom.Element element) {
+    assert(element.localName == 'span');
+    final debugHtmlNode = kDebugMode ? element : null;
+
+    final classes = element.className.split(' ')..sort();
+    assert(classes.contains('topic-mention')
+      || classes.contains('user-mention')
+      || classes.contains('user-group-mention'));
+    int i = 0;
+
+    if (i >= classes.length) return null;
+    bool hasChannelWildcardClass = false;
+    if (classes[i] == 'channel-wildcard-mention') {
+      // Newer channel wildcard mentions have this class; older ones don't.
+      i++;
+      hasChannelWildcardClass = true;
+    }
+
+    if (i >= classes.length) return null;
+    if (classes[i] == 'silent') {
+      // A silent @-mention.  We ignore this flag; see [UserMentionNode].
+      i++;
+    }
+
+    if (i >= classes.length) return null;
+    if ((classes[i] == 'topic-mention' && !hasChannelWildcardClass)
+        || classes[i] == 'user-mention'
+        || (classes[i] == 'user-group-mention' && !hasChannelWildcardClass)) {
+      // The class we already knew we'd find before we called this function.
+      // We ignore the distinction between these; see [UserMentionNode].
+      // Also, we don't expect "user-group-mention" and "channel-wildcard-mention"
+      // to be in the list at the same time and neither we expect "topic-mention"
+      // and "channel-wildcard-mention" to be in the list at the same time.
+      i++;
+    }
+
+    if (i != classes.length) {
+      // There was some class we didn't expect.
+      return null;
+    }
+
+    // TODO assert UserMentionNode can't contain LinkNode;
+    //   either a debug-mode check, or perhaps we can make expectations much
+    //   tighter on a UserMentionNode's contents overall.
+    final nodes = parseInlineContentList(element.nodes);
+    return UserMentionNode(nodes: nodes, debugHtmlNode: debugHtmlNode);
+  }
 
   /// The links found so far in the current block inline container.
   ///
@@ -523,31 +985,20 @@ class _ZulipContentParser {
     return result;
   }
 
-  static final _emojiClassRegexp = RegExp(r"^emoji(-[0-9a-f]+)*$");
+  /// Matches all className values that could be a UserMentionNode,
+  /// and no className values that could be any other type of node.
+  // Specifically, checks for `user-mention` or `user-group-mention`
+  // or `topic-mention` as a member of the list.
+  static final _userMentionClassNameRegexp = RegExp(
+    r"(^| )" r"(?:user(?:-group)?|topic)-mention" r"( |$)");
 
-  // Ported from https://github.com/zulip/zulip-mobile/blob/c979530d6804db33310ed7d14a4ac62017432944/src/emoji/data.js#L108-L112
-  //
-  // Which was in turn ported from https://github.com/zulip/zulip/blob/63c9296d5339517450f79f176dc02d77b08020c8/zerver/models.py#L3235-L3242
-  // and that describes the encoding as follows:
-  //
-  // > * For Unicode emoji, [emoji_code is] a dash-separated hex encoding of
-  // >   the sequence of Unicode codepoints that define this emoji in the
-  // >   Unicode specification.  For examples, see "non_qualified" or
-  // >   "unified" in the following data, with "non_qualified" taking
-  // >   precedence when both present:
-  // >   https://raw.githubusercontent.com/iamcal/emoji-data/master/emoji_pretty.json
-  String? tryParseEmojiCodeToUnicode(String code) {
-    try {
-      return String.fromCharCodes(code.split('-').map((hex) => int.parse(hex, radix: 16)));
-    } on FormatException { // thrown by `int.parse`
-      return null;
-    } on ArgumentError { // thrown by `String.fromCharCodes`
-      return null;
-    }
-  }
+  static final _emojiClassNameRegexp = () {
+    const specificEmoji = r"emoji(?:-[0-9a-f]+)+";
+    return RegExp("^(?:emoji $specificEmoji|$specificEmoji emoji)\$");
+  }();
+  static final _emojiCodeFromClassNameRegexp = RegExp(r"emoji-([^ ]+)");
 
   InlineContentNode parseInlineContent(dom.Node node) {
-    assert(_debugParserContext == _ParserContext.inline);
     final debugHtmlNode = kDebugMode ? node : null;
     InlineContentNode unimplemented() => UnimplementedInlineContentNode(htmlNode: node);
 
@@ -560,27 +1011,30 @@ class _ZulipContentParser {
 
     final element = node;
     final localName = element.localName;
-    final classes = element.classes;
+    final className = element.className;
     List<InlineContentNode> nodes() => parseInlineContentList(element.nodes);
 
-    if (localName == 'br' && classes.isEmpty) {
+    if (localName == 'br' && className.isEmpty) {
       return LineBreakInlineNode(debugHtmlNode: debugHtmlNode);
     }
-    if (localName == 'strong' && classes.isEmpty) {
+    if (localName == 'strong' && className.isEmpty) {
       return StrongNode(nodes: nodes(), debugHtmlNode: debugHtmlNode);
     }
-    if (localName == 'em' && classes.isEmpty) {
+    if (localName == 'del' && className.isEmpty) {
+      return DeletedNode(nodes: nodes(), debugHtmlNode: debugHtmlNode);
+    }
+    if (localName == 'em' && className.isEmpty) {
       return EmphasisNode(nodes: nodes(), debugHtmlNode: debugHtmlNode);
     }
-    if (localName == 'code' && classes.isEmpty) {
+    if (localName == 'code' && className.isEmpty) {
       return InlineCodeNode(nodes: nodes(), debugHtmlNode: debugHtmlNode);
     }
 
     if (localName == 'a'
-        && (classes.isEmpty
-            || (classes.length == 1
-                && (classes.contains('stream-topic')
-                    || classes.contains('stream'))))) {
+        && (className.isEmpty
+            || className == 'stream-topic'
+            || className == 'stream'
+            || className == 'message-link')) {
       final href = element.attributes['href'];
       if (href == null) return unimplemented();
       final link = LinkNode(nodes: nodes(), url: href, debugHtmlNode: debugHtmlNode);
@@ -589,33 +1043,20 @@ class _ZulipContentParser {
     }
 
     if (localName == 'span'
-        && (classes.contains('user-mention')
-            || classes.contains('user-group-mention'))
-        && (classes.length == 1
-            || (classes.length == 2 && classes.contains('silent')))) {
-      // TODO assert UserMentionNode can't contain LinkNode;
-      //   either a debug-mode check, or perhaps we can make expectations much
-      //   tighter on a UserMentionNode's contents overall.
-      return UserMentionNode(nodes: nodes(), debugHtmlNode: debugHtmlNode);
+        && _userMentionClassNameRegexp.hasMatch(className)) {
+      return parseUserMention(element) ?? unimplemented();
     }
 
     if (localName == 'span'
-        && classes.length == 2
-        && classes.contains('emoji')
-        && classes.every(_emojiClassRegexp.hasMatch)) {
-      final emojiCode = classes
-        .firstWhere((className) => className.startsWith('emoji-'))
-        .replaceFirst('emoji-', '');
-      assert(emojiCode.isNotEmpty);
-
+        && _emojiClassNameRegexp.hasMatch(className)) {
+      final emojiCode = _emojiCodeFromClassNameRegexp.firstMatch(className)!
+        .group(1)!;
       final unicode = tryParseEmojiCodeToUnicode(emojiCode);
       if (unicode == null) return unimplemented();
       return UnicodeEmojiNode(emojiUnicode: unicode, debugHtmlNode: debugHtmlNode);
     }
 
-    if (localName == 'img'
-        && classes.contains('emoji')
-        && classes.length == 1) {
+    if (localName == 'img' && className == 'emoji') {
       final alt = element.attributes['alt'];
       if (alt == null) return unimplemented();
       final src = element.attributes['src'];
@@ -623,72 +1064,119 @@ class _ZulipContentParser {
       return ImageEmojiNode(src: src, alt: alt, debugHtmlNode: debugHtmlNode);
     }
 
+    if (localName == 'time' && className.isEmpty) {
+      final dateTimeAttr = element.attributes['datetime'];
+      if (dateTimeAttr == null) return unimplemented();
+
+      // This attribute is always in ISO 8601 format with a Z suffix;
+      // see `Timestamp` in zulip:zerver/lib/markdown/__init__.py .
+      final datetime = DateTime.tryParse(dateTimeAttr);
+      if (datetime == null) return unimplemented();
+      if (!datetime.isUtc) return unimplemented();
+
+      return GlobalTimeNode(datetime: datetime, debugHtmlNode: debugHtmlNode);
+    }
+
+    if (localName == 'span' && className == 'katex') {
+      return parseInlineMath(element) ?? unimplemented();
+    }
+
     // TODO more types of node
     return unimplemented();
   }
 
   List<InlineContentNode> parseInlineContentList(List<dom.Node> nodes) {
-    assert(_debugParserContext == _ParserContext.inline);
     return nodes.map(parseInlineContent).toList(growable: false);
   }
 
+  /// Parse the children of a [BlockInlineContainerNode], making up a
+  /// complete subtree of inline content with no further inline ancestors.
   ({List<InlineContentNode> nodes, List<LinkNode>? links}) parseBlockInline(List<dom.Node> nodes) {
-    assert(_debugParserContext == _ParserContext.block);
-    assert(() {
-      _debugParserContext = _ParserContext.inline;
-      return true;
-    }());
     final resultNodes = parseInlineContentList(nodes);
-    assert(() {
-      _debugParserContext = _ParserContext.block;
-      return true;
-    }());
     return (nodes: resultNodes, links: _takeLinkNodes());
+  }
+}
+
+/// Parser for a complete piece of Zulip HTML content, a [ZulipContent].
+///
+/// The only entry point to this class is [parse].
+class _ZulipContentParser {
+  /// The single inline-content parser used and re-used throughout parsing of
+  /// a complete piece of Zulip HTML content.
+  ///
+  /// Because block content can never appear nested inside inline content,
+  /// there's never a need for more than one of these at a time,
+  /// so we can allocate just one up front.
+  final inlineParser = _ZulipInlineContentParser();
+
+  ({List<InlineContentNode> nodes, List<LinkNode>? links}) parseBlockInline(List<dom.Node> nodes) {
+    return inlineParser.parseBlockInline(nodes);
   }
 
   BlockContentNode parseListNode(dom.Element element) {
-    assert(_debugParserContext == _ParserContext.block);
-    ListStyle? listStyle;
-    switch (element.localName) {
-      case 'ol': listStyle = ListStyle.ordered; break;
-      case 'ul': listStyle = ListStyle.unordered; break;
-    }
-    assert(listStyle != null);
-    assert(element.classes.isEmpty);
+    assert(element.localName == 'ol' || element.localName == 'ul');
+    assert(element.className.isEmpty);
 
     final debugHtmlNode = kDebugMode ? element : null;
     final List<List<BlockContentNode>> items = [];
     for (final item in element.nodes) {
       if (item is dom.Text && item.text == '\n') continue;
-      if (item is! dom.Element || item.localName != 'li' || item.classes.isNotEmpty) {
+      if (item is! dom.Element || item.localName != 'li' || item.className.isNotEmpty) {
         items.add([UnimplementedBlockContentNode(htmlNode: item)]);
       }
       items.add(parseImplicitParagraphBlockContentList(item.nodes));
     }
 
-    return ListNode(listStyle!, items, debugHtmlNode: debugHtmlNode);
+    if (element.localName == 'ol') {
+      final startAttr = element.attributes['start'];
+      final start = startAttr == null ? 1
+        : int.tryParse(startAttr, radix: 10);
+      if (start == null) return UnimplementedBlockContentNode(htmlNode: element);
+      return OrderedListNode(items, start: start, debugHtmlNode: debugHtmlNode);
+    } else {
+      return UnorderedListNode(items, debugHtmlNode: debugHtmlNode);
+    }
+  }
+
+  BlockContentNode parseSpoilerNode(dom.Element divElement) {
+    assert(divElement.localName == 'div'
+        && divElement.className == 'spoiler-block');
+
+    if (divElement.nodes case [
+      dom.Element(
+        localName: 'div', className: 'spoiler-header', nodes: var headerNodes),
+      dom.Element(
+        localName: 'div', className: 'spoiler-content', nodes: var contentNodes),
+    ]) {
+      return SpoilerNode(
+        header: parseBlockContentList(headerNodes),
+        content: parseBlockContentList(contentNodes),
+      );
+    } else {
+      return UnimplementedBlockContentNode(htmlNode: divElement);
+    }
   }
 
   BlockContentNode parseCodeBlock(dom.Element divElement) {
-    assert(_debugParserContext == _ParserContext.block);
     final mainElement = () {
       assert(divElement.localName == 'div'
-          && divElement.classes.length == 1
-          && divElement.classes.contains("codehilite"));
+          && divElement.className == "codehilite");
 
       if (divElement.nodes.length != 1) return null;
-      final child = divElement.nodes[0];
+      final child = divElement.nodes.single;
       if (child is! dom.Element) return null;
       if (child.localName != 'pre') return null;
 
-      if (child.nodes.length > 2) return null;
+      if (child.nodes.length > 2 || child.nodes.isEmpty) return null;
       if (child.nodes.length == 2) {
         final first = child.nodes[0];
         if (first is! dom.Element
             || first.localName != 'span'
-            || first.nodes.isNotEmpty) return null;
+            || first.nodes.isNotEmpty) {
+          return null;
+        }
       }
-      final grandchild = child.nodes[child.nodes.length - 1];
+      final grandchild = child.nodes.last;
       if (grandchild is! dom.Element) return null;
       if (grandchild.localName != 'code') return null;
 
@@ -717,11 +1205,18 @@ class _ZulipContentParser {
           }
           span = CodeBlockSpanNode(text: text, type: CodeBlockSpanType.text);
 
-        case dom.Element(localName: 'span', :final text, :final classes)
-            when classes.length == 1:
-          final CodeBlockSpanType type = codeBlockSpanTypeFromClassName(classes.first);
-          switch (type) {
-            case CodeBlockSpanType.unknown:
+        case dom.Element(localName: 'span', :final text, :final className):
+          // Empirically, when a Pygments node has multiple classes, the first
+          // class names a standard token type and the rest are for non-standard
+          // token types specific to the language.  Zulip web only styles the
+          // standard token classes and ignores the others, so we do the same.
+          // See: https://github.com/zulip/zulip-flutter/issues/933
+          final spanType = className.split(' ')
+            .map(codeBlockSpanTypeFromClassName)
+            .firstWhereOrNull((e) => e != CodeBlockSpanType.unknown);
+
+          switch (spanType) {
+            case null:
               // TODO(#194): Show these as un-syntax-highlighted code, in production.
               return UnimplementedBlockContentNode(htmlNode: divElement);
             case CodeBlockSpanType.highlightedLines:
@@ -729,7 +1224,7 @@ class _ZulipContentParser {
               //       inherited styles for `span.hll` nodes.
               return UnimplementedBlockContentNode(htmlNode: divElement);
             default:
-              span = CodeBlockSpanNode(text: text, type: type);
+              span = CodeBlockSpanNode(text: text, type: spanType);
           }
 
         default:
@@ -742,56 +1237,459 @@ class _ZulipContentParser {
     return CodeBlockNode(spans, debugHtmlNode: debugHtmlNode);
   }
 
+  static final _imageDimensionsRegExp = RegExp(r'^(\d+)x(\d+)$');
+
   BlockContentNode parseImageNode(dom.Element divElement) {
-    assert(_debugParserContext == _ParserContext.block);
-    final imgElement = () {
+    final elements = () {
       assert(divElement.localName == 'div'
-          && divElement.classes.length == 1
-          && divElement.classes.contains('message_inline_image'));
+          && divElement.className == 'message_inline_image');
 
       if (divElement.nodes.length != 1) return null;
       final child = divElement.nodes[0];
       if (child is! dom.Element) return null;
       if (child.localName != 'a') return null;
-      if (child.classes.isNotEmpty) return null;
+      if (child.className.isNotEmpty) return null;
 
       if (child.nodes.length != 1) return null;
       final grandchild = child.nodes[0];
       if (grandchild is! dom.Element) return null;
       if (grandchild.localName != 'img') return null;
-      if (grandchild.classes.isNotEmpty) return null;
-      return grandchild;
+      return (child, grandchild);
     }();
 
     final debugHtmlNode = kDebugMode ? divElement : null;
-    if (imgElement == null) {
+    if (elements == null) {
       return UnimplementedBlockContentNode(htmlNode: divElement);
     }
 
+    final (linkElement, imgElement) = elements;
+    final href = linkElement.attributes['href'];
+    if (href == null) {
+      return UnimplementedBlockContentNode(htmlNode: divElement);
+    }
+    if (imgElement.className == 'image-loading-placeholder') {
+      return ImageNode(
+        srcUrl: href,
+        thumbnailUrl: null,
+        loading: true,
+        originalWidth: null,
+        originalHeight: null,
+        debugHtmlNode: debugHtmlNode);
+    }
     final src = imgElement.attributes['src'];
     if (src == null) {
       return UnimplementedBlockContentNode(htmlNode: divElement);
     }
 
-    return ImageNode(srcUrl: src, debugHtmlNode: debugHtmlNode);
+    final String srcUrl;
+    final String? thumbnailUrl;
+    if (src.startsWith('/user_uploads/thumbnail/')) {
+      srcUrl = href;
+      thumbnailUrl = src;
+    } else if (src.startsWith('/external_content/')
+        || src.startsWith('https://uploads.zulipusercontent.net/')) {
+      srcUrl = src;
+      thumbnailUrl = null;
+    } else if (href == src)  {
+      srcUrl = src;
+      thumbnailUrl = null;
+    } else {
+      return UnimplementedBlockContentNode(htmlNode: divElement);
+    }
+
+    double? originalWidth, originalHeight;
+    final originalDimensions = imgElement.attributes['data-original-dimensions'];
+    if (originalDimensions != null) {
+      // Server encodes this string as "{width}x{height}" (eg. "300x400")
+      final match = _imageDimensionsRegExp.firstMatch(originalDimensions);
+      if (match != null) {
+        final width = int.tryParse(match.group(1)!, radix: 10);
+        final height = int.tryParse(match.group(2)!, radix: 10);
+        if (width != null && height != null) {
+          originalWidth = width.toDouble();
+          originalHeight = height.toDouble();
+        }
+      }
+
+      if (originalWidth == null || originalHeight == null) {
+        return UnimplementedBlockContentNode(htmlNode: divElement);
+      }
+    }
+
+    return ImageNode(
+      srcUrl: srcUrl,
+      thumbnailUrl: thumbnailUrl,
+      loading: false,
+      originalWidth: originalWidth,
+      originalHeight: originalHeight,
+      debugHtmlNode: debugHtmlNode);
+  }
+
+  static final _videoClassNameRegexp = () {
+    const sourceType = r"(message_inline_video|youtube-video|embed-video)";
+    return RegExp("^message_inline_image $sourceType|$sourceType message_inline_image\$");
+  }();
+
+  BlockContentNode parseInlineVideoNode(dom.Element divElement) {
+    assert(divElement.localName == 'div'
+      && _videoClassNameRegexp.hasMatch(divElement.className));
+
+    final videoElement = () {
+      if (divElement.nodes.length != 1) return null;
+      final child = divElement.nodes[0];
+      if (child is! dom.Element) return null;
+      if (child.localName != 'a') return null;
+      if (child.className.isNotEmpty) return null;
+
+      if (child.nodes.length != 1) return null;
+      final grandchild = child.nodes[0];
+      if (grandchild is! dom.Element) return null;
+      if (grandchild.localName != 'video') return null;
+      if (grandchild.className.isNotEmpty) return null;
+      return grandchild;
+    }();
+
+    final debugHtmlNode = kDebugMode ? divElement : null;
+    if (videoElement == null) {
+      return UnimplementedBlockContentNode(htmlNode: divElement);
+    }
+
+    final src = videoElement.attributes['src'];
+    if (src == null) {
+      return UnimplementedBlockContentNode(htmlNode: divElement);
+    }
+
+    return InlineVideoNode(srcUrl: src, debugHtmlNode: debugHtmlNode);
+  }
+
+  BlockContentNode parseEmbedVideoNode(dom.Element divElement) {
+    assert(divElement.localName == 'div'
+      && _videoClassNameRegexp.hasMatch(divElement.className));
+
+    final pair = () {
+      if (divElement.nodes.length != 1) return null;
+      final child = divElement.nodes[0];
+      if (child is! dom.Element) return null;
+      if (child.localName != 'a') return null;
+      if (child.className.isNotEmpty) return null;
+
+      if (child.nodes.length != 1) return null;
+      final grandchild = child.nodes[0];
+      if (grandchild is! dom.Element) return null;
+      if (grandchild.localName != 'img') return null;
+      if (grandchild.className.isNotEmpty) return null;
+      return (child, grandchild);
+    }();
+
+    final debugHtmlNode = kDebugMode ? divElement : null;
+    if (pair == null) {
+      return UnimplementedBlockContentNode(htmlNode: divElement);
+    }
+    final (anchorElement, imgElement) = pair;
+
+    final imgSrc = imgElement.attributes['src'];
+    if (imgSrc == null) {
+      return UnimplementedBlockContentNode(htmlNode: divElement);
+    }
+
+    final href = anchorElement.attributes['href'];
+    if (href == null) {
+      return UnimplementedBlockContentNode(htmlNode: divElement);
+    }
+
+    return EmbedVideoNode(hrefUrl: href, previewImageSrcUrl: imgSrc, debugHtmlNode: debugHtmlNode);
+  }
+
+  static final _websitePreviewImageSrcRegexp = RegExp(r'background-image: url\(("?)(.+?)\1\)');
+
+  BlockContentNode parseWebsitePreviewNode(dom.Element divElement) {
+    assert(divElement.localName == 'div'
+      && divElement.className == 'message_embed');
+
+    final debugHtmlNode = kDebugMode ? divElement : null;
+    final result = () {
+      if (divElement.nodes case [
+        dom.Element(
+          localName: 'a',
+          className: 'message_embed_image',
+          attributes: {
+            'href': final String imageHref,
+            'style': final String imageStyleAttr,
+          },
+          nodes: []),
+        dom.Element(
+          localName: 'div',
+          className: 'data-container',
+          nodes: [...]) && final dataContainer,
+      ]) {
+        final match = _websitePreviewImageSrcRegexp.firstMatch(imageStyleAttr);
+        if (match == null) return null;
+        final imageSrcUrl = match.group(2);
+        if (imageSrcUrl == null) return null;
+
+        String? parseTitle(dom.Element element) {
+          assert(element.localName == 'div' &&
+            element.className == 'message_embed_title');
+          if (element.nodes case [
+            dom.Element(localName: 'a', className: '') && final child,
+          ]) {
+            final titleHref = child.attributes['href'];
+            // Make sure both image hyperlink and title hyperlink are same.
+            if (imageHref != titleHref) return null;
+
+            if (child.nodes case [dom.Text(text: final title)]) {
+              return title;
+            }
+          }
+          return null;
+        }
+
+        String? parseDescription(dom.Element element) {
+          assert(element.localName == 'div' &&
+            element.className == 'message_embed_description');
+          if (element.nodes case [dom.Text(text: final description)]) {
+            return description;
+          }
+          return null;
+        }
+
+        String? title, description;
+        switch (dataContainer.nodes) {
+          case [
+            dom.Element(
+              localName: 'div',
+              className: 'message_embed_title') && final first,
+            dom.Element(
+              localName: 'div',
+              className: 'message_embed_description') && final second,
+          ]:
+            title = parseTitle(first);
+            if (title == null) return null;
+            description = parseDescription(second);
+            if (description == null) return null;
+
+          case [dom.Element(localName: 'div') && final single]:
+            switch (single.className) {
+              case 'message_embed_title':
+                title = parseTitle(single);
+                if (title == null) return null;
+
+              case 'message_embed_description':
+                description = parseDescription(single);
+                if (description == null) return null;
+
+              default:
+                return null;
+            }
+
+          case []:
+            // Server generates an empty `<div class="data-container"></div>`
+            // if website HTML has neither title (derived from
+            // `og:title` or `<title>…</title>`) nor description (derived from
+            // `og:description`).
+            break;
+
+          default:
+            return null;
+        }
+
+        return WebsitePreviewNode(
+          hrefUrl: imageHref,
+          imageSrcUrl: imageSrcUrl,
+          title: title,
+          description: description,
+          debugHtmlNode: debugHtmlNode);
+      } else {
+        return null;
+      }
+    }();
+
+    return result ?? UnimplementedBlockContentNode(htmlNode: divElement);
+  }
+
+  BlockContentNode parseTableContent(dom.Element tableElement) {
+    assert(tableElement.localName == 'table'
+        && tableElement.className.isEmpty);
+
+    TableCellNode? parseTableCell(dom.Element node, bool isHeader) {
+      assert(node.localName == (isHeader ? 'th' : 'td'));
+      assert(node.className.isEmpty);
+
+      final cellStyle = node.attributes['style'];
+      final TableColumnTextAlignment? textAlignment;
+      switch (cellStyle) {
+        case null:
+          textAlignment = TableColumnTextAlignment.defaults;
+        case 'text-align: left;':
+          textAlignment = TableColumnTextAlignment.left;
+        case 'text-align: center;':
+          textAlignment = TableColumnTextAlignment.center;
+        case 'text-align: right;':
+          textAlignment = TableColumnTextAlignment.right;
+        default:
+          return null;
+      }
+      final parsed = parseBlockInline(node.nodes);
+      return TableCellNode(
+        nodes: parsed.nodes,
+        links: parsed.links,
+        textAlignment: textAlignment);
+    }
+
+    List<TableCellNode>? parseTableCells(dom.NodeList cellNodes, bool isHeader) {
+      final cells = <TableCellNode>[];
+      for (final node in cellNodes) {
+        if (node is dom.Text && node.text == '\n') continue;
+
+        if (node is! dom.Element) return null;
+        if (node.localName != (isHeader ? 'th' : 'td')) return null;
+        if (node.className.isNotEmpty) return null;
+
+        final cell = parseTableCell(node, isHeader);
+        if (cell == null) return null;
+        cells.add(cell);
+      }
+      return cells;
+    }
+
+    final TableNode? tableNode = (() {
+      if (tableElement.nodes case [
+        dom.Text(data: '\n'),
+        dom.Element(localName: 'thead') && final theadElement,
+        dom.Text(data: '\n'),
+        dom.Element(localName: 'tbody') && final tbodyElement,
+        dom.Text(data: '\n'),
+      ]) {
+        if (theadElement.className.isNotEmpty) return null;
+        if (theadElement.nodes.isEmpty) return null;
+        if (tbodyElement.className.isNotEmpty) return null;
+        if (tbodyElement.nodes.isEmpty) return null;
+
+        final int headerColumnCount;
+        final parsedRows = <TableRowNode>[];
+
+        // Parse header row element.
+        if (theadElement.nodes case [
+          dom.Text(data: '\n'),
+          dom.Element(localName: 'tr') && final rowElement,
+          dom.Text(data: '\n'),
+        ]) {
+          if (rowElement.className.isNotEmpty) return null;
+          if (rowElement.nodes.isEmpty) return null;
+
+          final cells = parseTableCells(rowElement.nodes, true);
+          if (cells == null) return null;
+          headerColumnCount = cells.length;
+          parsedRows.add(TableRowNode(cells: cells, isHeader: true));
+        } else {
+          // TODO(dart): simplify after https://github.com/dart-lang/language/issues/2537
+          return null;
+        }
+
+        // Parse body row elements.
+        for (final node in tbodyElement.nodes) {
+          if (node is dom.Text && node.text == '\n') continue;
+
+          if (node is! dom.Element) return null;
+          if (node.localName != 'tr') return null;
+          if (node.className.isNotEmpty) return null;
+          if (node.nodes.isEmpty) return null;
+
+          final cells = parseTableCells(node.nodes, false);
+          if (cells == null) return null;
+
+          // Ensure that the number of columns in this row matches
+          // the header row.
+          if (cells.length != headerColumnCount) return null;
+          parsedRows.add(TableRowNode(cells: cells, isHeader: false));
+        }
+
+        return TableNode(rows: parsedRows);
+      } else {
+        // TODO(dart): simplify after https://github.com/dart-lang/language/issues/2537
+        return null;
+      }
+    })();
+
+    return tableNode ?? UnimplementedBlockContentNode(htmlNode: tableElement);
+  }
+
+  void parseMathBlocks(dom.NodeList nodes, List<BlockContentNode> result) {
+    assert(nodes.isNotEmpty);
+    assert((() {
+      final first = nodes.first;
+      return first is dom.Element
+        && first.localName == 'span'
+        && first.className == 'katex-display';
+    })());
+
+    final firstChild = nodes.first as dom.Element;
+    final texSource = _parseMath(firstChild, block: true);
+    if (texSource != null) {
+      result.add(MathBlockNode(
+        texSource: texSource,
+        debugHtmlNode: kDebugMode ? firstChild : null));
+    } else {
+      result.add(UnimplementedBlockContentNode(htmlNode: firstChild));
+    }
+
+    // Skip further checks if there was only a single child.
+    if (nodes.length == 1) return;
+
+    // The case with the `<br>\n` can happen when at the end of a quote;
+    // it seems like a glitch in the server's Markdown processing,
+    // so hopefully there just aren't any further such glitches.
+    bool hasTrailingBreakNewline = false;
+    if (nodes case [..., dom.Element(localName: 'br'), dom.Text(text: '\n')]) {
+      hasTrailingBreakNewline = true;
+    }
+
+    final length = hasTrailingBreakNewline
+      ? nodes.length - 2
+      : nodes.length;
+    for (int i = 1; i < length; i++) {
+      final child = nodes[i];
+      final debugHtmlNode = kDebugMode ? child : null;
+
+      // If there are multiple <span class="katex-display"> nodes in a <p>
+      // each node is interleaved by '\n\n'. Whitespaces are ignored in HTML
+      // on web but each node has `display: block`, which renders each node
+      // on a new line. Since the emitted MathBlockNode are BlockContentNode,
+      // we skip these newlines here to replicate the same behavior as on web.
+      if (child case dom.Text(text: '\n\n')) continue;
+
+      if (child case dom.Element(localName: 'span', className: 'katex-display')) {
+        final texSource = _parseMath(child, block: true);
+        if (texSource != null) {
+          result.add(MathBlockNode(
+            texSource: texSource,
+            debugHtmlNode: debugHtmlNode));
+          continue;
+        }
+      }
+
+      result.add(UnimplementedBlockContentNode(htmlNode: child));
+    }
   }
 
   BlockContentNode parseBlockContent(dom.Node node) {
-    assert(_debugParserContext == _ParserContext.block);
     final debugHtmlNode = kDebugMode ? node : null;
     if (node is! dom.Element) {
       return UnimplementedBlockContentNode(htmlNode: node);
     }
     final element = node;
     final localName = element.localName;
-    final classes = element.classes;
-    List<BlockContentNode> blockNodes() => parseBlockContentList(element.nodes);
+    final className = element.className;
 
-    if (localName == 'br' && classes.isEmpty) {
+    if (localName == 'br' && className.isEmpty) {
       return LineBreakNode(debugHtmlNode: debugHtmlNode);
     }
 
-    if (localName == 'p' && classes.isEmpty) {
+    if (localName == 'hr' && className.isEmpty) {
+      return ThematicBreakNode(debugHtmlNode: debugHtmlNode);
+    }
+
+    if (localName == 'p' && className.isEmpty) {
       final parsed = parseBlockInline(element.nodes);
       return ParagraphNode(debugHtmlNode: debugHtmlNode,
         links: parsed.links,
@@ -807,31 +1705,54 @@ class _ZulipContentParser {
       case 'h5': headingLevel = HeadingLevel.h5; break;
       case 'h6': headingLevel = HeadingLevel.h6; break;
     }
-    if (headingLevel == HeadingLevel.h6 && classes.isEmpty) {
-      // TODO(#192) handle h1, h2, h3, h4, h5
+    if (headingLevel != null && className.isEmpty) {
       final parsed = parseBlockInline(element.nodes);
       return HeadingNode(debugHtmlNode: debugHtmlNode,
-        level: headingLevel!,
+        level: headingLevel,
         links: parsed.links,
         nodes: parsed.nodes);
     }
 
-    if ((localName == 'ol' || localName == 'ul') && classes.isEmpty) {
+    if ((localName == 'ol' || localName == 'ul') && className.isEmpty) {
       return parseListNode(element);
     }
 
-    if (localName == 'blockquote' && classes.isEmpty) {
-      return QuotationNode(blockNodes(), debugHtmlNode: debugHtmlNode);
+    if (localName == 'blockquote' && className.isEmpty) {
+      return QuotationNode(debugHtmlNode: debugHtmlNode,
+        parseBlockContentList(element.nodes));
     }
 
-    if (localName == 'div'
-        && classes.length == 1 && classes.contains('codehilite')) {
+    if (localName == 'table' && className.isEmpty) {
+      return parseTableContent(element);
+    }
+
+    if (localName == 'div' && className == 'spoiler-block') {
+      return parseSpoilerNode(element);
+    }
+
+    if (localName == 'div' && className == 'codehilite') {
       return parseCodeBlock(element);
     }
 
-    if (localName == 'div'
-        && classes.length == 1 && classes.contains('message_inline_image')) {
+    if (localName == 'div' && className == 'message_inline_image') {
       return parseImageNode(element);
+    }
+
+    if (localName == 'div') {
+      final match = _videoClassNameRegexp.firstMatch(className);
+      if (match != null) {
+        final videoClass = match.group(1) ?? match.group(2)!;
+        switch (videoClass) {
+          case 'message_inline_video':
+            return parseInlineVideoNode(element);
+          case 'youtube-video' || 'embed-video':
+            return parseEmbedVideoNode(element);
+        }
+      }
+    }
+
+    if (localName == 'div' && className == 'message_embed') {
+      return parseWebsitePreviewNode(element);
     }
 
     // TODO more types of node
@@ -853,6 +1774,7 @@ class _ZulipContentParser {
       case 'h5':
       case 'h6':
       case 'blockquote':
+      case 'table':
       case 'div':
         return false;
       default:
@@ -864,8 +1786,14 @@ class _ZulipContentParser {
   ///
   /// See [ParagraphNode].
   List<BlockContentNode> parseImplicitParagraphBlockContentList(dom.NodeList nodes) {
-    assert(_debugParserContext == _ParserContext.block);
     final List<BlockContentNode> result = [];
+
+    List<ImageNode> imageNodes = [];
+    void consumeImageNodes() {
+      result.add(ImageNodeList(imageNodes));
+      imageNodes = [];
+    }
+
     final List<dom.Node> currentParagraph = [];
     void consumeParagraph() {
       final parsed = parseBlockInline(currentParagraph);
@@ -879,27 +1807,80 @@ class _ZulipContentParser {
     for (final node in nodes) {
       if (node is dom.Text && (node.text == '\n')) continue;
 
+      // Oddly, the way math blocks get encoded in Zulip HTML is inside a <p>.
+      // And there can be multiple math blocks inside the paragraph node, so
+      // handle it explicitly here.
+      if (node case dom.Element(localName: 'p', className: '', nodes: [
+            dom.Element(localName: 'span', className: 'katex-display'), ...])) {
+        if (currentParagraph.isNotEmpty) consumeParagraph();
+        if (imageNodes.isNotEmpty) consumeImageNodes();
+        parseMathBlocks(node.nodes, result);
+        continue;
+      }
+
       if (_isPossibleInlineNode(node)) {
+        if (imageNodes.isNotEmpty) {
+          consumeImageNodes();
+          // In a context where paragraphs are implicit it should be impossible
+          // to have more paragraph content after image previews.
+          result.add(UnimplementedBlockContentNode(htmlNode: node));
+          continue;
+        }
         currentParagraph.add(node);
         continue;
       }
       if (currentParagraph.isNotEmpty) consumeParagraph();
-      result.add(parseBlockContent(node));
+      final block = parseBlockContent(node);
+      if (block is ImageNode) {
+        imageNodes.add(block);
+        continue;
+      }
+      if (imageNodes.isNotEmpty) consumeImageNodes();
+      result.add(block);
     }
     if (currentParagraph.isNotEmpty) consumeParagraph();
-
+    if (imageNodes.isNotEmpty) consumeImageNodes();
     return result;
   }
 
+  static final _redundantLineBreaksRegexp = RegExp(r'^\n+$');
+
   List<BlockContentNode> parseBlockContentList(dom.NodeList nodes) {
-    assert(_debugParserContext == _ParserContext.block);
-    final acceptedNodes = nodes.where((node) {
+    final List<BlockContentNode> result = [];
+
+    List<ImageNode> imageNodes = [];
+    void consumeImageNodes() {
+      result.add(ImageNodeList(imageNodes));
+      imageNodes = [];
+    }
+
+    for (final node in nodes) {
       // We get a bunch of newline Text nodes between paragraphs.
       // A browser seems to ignore these; let's do the same.
-      if (node is dom.Text && (node.text == '\n')) return false;
-      return true;
-    });
-    return acceptedNodes.map(parseBlockContent).toList(growable: false);
+      if (node is dom.Text && _redundantLineBreaksRegexp.hasMatch(node.text)) {
+        continue;
+      }
+
+      // Oddly, the way math blocks get encoded in Zulip HTML is inside a <p>.
+      // And there can be multiple math blocks inside the paragraph node, so
+      // handle it explicitly here.
+      if (node case dom.Element(localName: 'p', className: '', nodes: [
+            dom.Element(localName: 'span', className: 'katex-display'), ...])) {
+        if (imageNodes.isNotEmpty) consumeImageNodes();
+        parseMathBlocks(node.nodes, result);
+        continue;
+      }
+
+      final block = parseBlockContent(node);
+      if (block is ImageNode) {
+        imageNodes.add(block);
+        continue;
+      }
+      if (imageNodes.isNotEmpty) consumeImageNodes();
+      result.add(block);
+    }
+    if (imageNodes.isNotEmpty) consumeImageNodes();
+    return result;
   }
 
   ZulipContent parse(String html) {
@@ -909,6 +1890,8 @@ class _ZulipContentParser {
   }
 }
 
+/// Parse a complete piece of Zulip HTML content,
+/// such as an entire value of [Message.content].
 ZulipContent parseContent(String html) {
   return _ZulipContentParser().parse(html);
 }

@@ -1,7 +1,9 @@
 import 'package:json_annotation/json_annotation.dart';
 
-import 'initial_snapshot.dart';
+import '../../model/algorithms.dart';
+import 'json.dart';
 import 'model.dart';
+import 'submessage.dart';
 
 part 'events.g.dart';
 
@@ -16,6 +18,11 @@ sealed class Event {
 
   factory Event.fromJson(Map<String, dynamic> json) {
     switch (json['type'] as String) {
+      case 'realm_emoji':
+        switch (json['op'] as String) {
+          case 'update': return RealmEmojiUpdateEvent.fromJson(json);
+          default: return UnexpectedEvent.fromJson(json);
+        }
       case 'alert_words': return AlertWordsEvent.fromJson(json);
       case 'user_settings':
         switch (json['op'] as String) {
@@ -32,11 +39,22 @@ sealed class Event {
         }
       case 'stream':
         switch (json['op'] as String) {
-          case 'create': return StreamCreateEvent.fromJson(json);
-          case 'delete': return StreamDeleteEvent.fromJson(json);
-          // TODO(#182): case 'update': …
+          case 'create': return ChannelCreateEvent.fromJson(json);
+          case 'delete': return ChannelDeleteEvent.fromJson(json);
+          case 'update': return ChannelUpdateEvent.fromJson(json);
           default: return UnexpectedEvent.fromJson(json);
         }
+      case 'subscription':
+        switch (json['op'] as String) {
+          case 'add': return SubscriptionAddEvent.fromJson(json);
+          case 'remove': return SubscriptionRemoveEvent.fromJson(json);
+          case 'update': return SubscriptionUpdateEvent.fromJson(json);
+          case 'peer_add': return SubscriptionPeerAddEvent.fromJson(json);
+          case 'peer_remove': return SubscriptionPeerRemoveEvent.fromJson(json);
+          default: return UnexpectedEvent.fromJson(json);
+        }
+      // case 'muted_topics': … // TODO(#422) we ignore this feature on older servers
+      case 'user_topic': return UserTopicEvent.fromJson(json);
       case 'message': return MessageEvent.fromJson(json);
       case 'update_message': return UpdateMessageEvent.fromJson(json);
       case 'delete_message': return DeleteMessageEvent.fromJson(json);
@@ -46,6 +64,8 @@ sealed class Event {
           case 'remove': return UpdateMessageFlagsRemoveEvent.fromJson(json);
           default: return UnexpectedEvent.fromJson(json);
         }
+      case 'submessage': return SubmessageEvent.fromJson(json);
+      case 'typing': return TypingEvent.fromJson(json);
       case 'reaction': return ReactionEvent.fromJson(json);
       case 'heartbeat': return HeartbeatEvent.fromJson(json);
       // TODO add many more event types
@@ -67,6 +87,28 @@ class UnexpectedEvent extends Event {
 
   @override
   Map<String, dynamic> toJson() => json;
+}
+
+/// A Zulip event of type `realm_emoji` with op `update`:
+///   https://zulip.com/api/get-events#realm_emoji-update
+@JsonSerializable(fieldRename: FieldRename.snake)
+class RealmEmojiUpdateEvent extends Event {
+  @override
+  @JsonKey(includeToJson: true)
+  String get type => 'realm_emoji';
+
+  @JsonKey(includeToJson: true)
+  String get op => 'update';
+
+  final Map<String, RealmEmojiItem> realmEmoji;
+
+  RealmEmojiUpdateEvent({required super.id, required this.realmEmoji});
+
+  factory RealmEmojiUpdateEvent.fromJson(Map<String, dynamic> json) =>
+    _$RealmEmojiUpdateEventFromJson(json);
+
+  @override
+  Map<String, dynamic> toJson() => _$RealmEmojiUpdateEventToJson(this);
 }
 
 /// A Zulip event of type `alert_words`: https://zulip.com/api/get-events#alert_words
@@ -111,7 +153,7 @@ class UserSettingsUpdateEvent extends Event {
 
   /// [value], with a check that its type corresponds to [property]
   /// (e.g., `value as bool`).
-  static Object? _readValue(Map json, String key) {
+  static Object? _readValue(Map<dynamic, dynamic> json, String key) {
     final value = json['value'];
     switch (UserSettingName.fromRawString(json['property'] as String)) {
       case UserSettingName.twentyFourHourTime:
@@ -159,7 +201,7 @@ class CustomProfileFieldsEvent extends Event {
 ///
 /// The corresponding API docs are in several places for
 /// different values of `op`; see subclasses.
-abstract class RealmUserEvent extends Event {
+sealed class RealmUserEvent extends Event {
   @override
   @JsonKey(includeToJson: true)
   String get type => 'realm_user';
@@ -173,6 +215,7 @@ abstract class RealmUserEvent extends Event {
 @JsonSerializable(fieldRename: FieldRename.snake)
 class RealmUserAddEvent extends RealmUserEvent {
   @override
+  @JsonKey(includeToJson: true)
   String get op => 'add';
 
   final User person;
@@ -189,6 +232,7 @@ class RealmUserAddEvent extends RealmUserEvent {
 /// A [RealmUserEvent] with op `remove`: https://zulip.com/api/get-events#realm_user-remove
 class RealmUserRemoveEvent extends RealmUserEvent {
   @override
+  @JsonKey(includeToJson: true)
   String get op => 'remove';
 
   final int userId;
@@ -226,9 +270,11 @@ class RealmUserUpdateCustomProfileField {
 @JsonSerializable(fieldRename: FieldRename.snake)
 class RealmUserUpdateEvent extends RealmUserEvent {
   @override
+  @JsonKey(includeToJson: true)
   String get op => 'update';
 
   @JsonKey(readValue: _readFromPerson) final int userId;
+
   @JsonKey(readValue: _readFromPerson) final String? fullName;
   @JsonKey(readValue: _readFromPerson) final String? avatarUrl;
   // @JsonKey(readValue: _readFromPerson) final String? avatarSource; // TODO obsolete?
@@ -238,17 +284,37 @@ class RealmUserUpdateEvent extends RealmUserEvent {
   @JsonKey(readValue: _readFromPerson) final int? botOwnerId;
   @JsonKey(readValue: _readFromPerson, unknownEnumValue: UserRole.unknown) final UserRole? role;
   @JsonKey(readValue: _readFromPerson) final bool? isBillingAdmin;
-  @JsonKey(readValue: _readFromPerson) final String? deliveryEmail; // TODO handle JSON `null`
+
+  @JsonKey(readValue: _readNullableStringFromPerson)
+  @NullableStringJsonConverter()
+  final JsonNullable<String>? deliveryEmail;
+
   @JsonKey(readValue: _readFromPerson) final RealmUserUpdateCustomProfileField? customProfileField;
   @JsonKey(readValue: _readFromPerson) final String? newEmail;
+  @JsonKey(readValue: _readFromPerson) final bool? isActive;
 
-  static Object? _readFromPerson(Map json, String key) {
+  static Object? _readFromPerson(Map<dynamic, dynamic> json, String key) {
     return (json['person'] as Map<String, dynamic>)[key];
+  }
+
+  static JsonNullable<String>? _readNullableStringFromPerson(
+      Map<dynamic, dynamic> json, String key) {
+    // We can't just say `readValue: _readNullableFromPerson<String>`,
+    // because json_serializable drops the type argument in the generated code.
+    return _readNullableFromPerson<String>(json, key);
+  }
+
+  static JsonNullable<T>? _readNullableFromPerson<T extends Object>(
+      Map<dynamic, dynamic> json, String key) {
+    return JsonNullable.readFromJson(json['person'] as Map<String, dynamic>, key);
   }
 
   RealmUserUpdateEvent({
     required super.id,
     required this.userId,
+    // Unlike in most of the API bindings, we leave these constructor arguments
+    // optional.  That's because in these events only one or a handful of these
+    // will appear in a given event value.
     this.fullName,
     this.avatarUrl,
     this.avatarVersion,
@@ -259,6 +325,7 @@ class RealmUserUpdateEvent extends RealmUserEvent {
     this.deliveryEmail,
     this.customProfileField,
     this.newEmail,
+    this.isActive,
   });
 
   factory RealmUserUpdateEvent.fromJson(Map<String, dynamic> json) =>
@@ -273,58 +340,336 @@ class RealmUserUpdateEvent extends RealmUserEvent {
 ///
 /// The corresponding API docs are in several places for
 /// different values of `op`; see subclasses.
-abstract class StreamEvent extends Event {
+sealed class ChannelEvent extends Event {
   @override
   @JsonKey(includeToJson: true)
   String get type => 'stream';
 
   String get op;
 
-  StreamEvent({required super.id});
+  ChannelEvent({required super.id});
 }
 
-/// A [StreamEvent] with op `create`: https://zulip.com/api/get-events#stream-create
+/// A [ChannelEvent] with op `create`: https://zulip.com/api/get-events#stream-create
 @JsonSerializable(fieldRename: FieldRename.snake)
-class StreamCreateEvent extends StreamEvent {
+class ChannelCreateEvent extends ChannelEvent {
   @override
+  @JsonKey(includeToJson: true)
   String get op => 'create';
 
   final List<ZulipStream> streams;
 
-  StreamCreateEvent({required super.id, required this.streams});
+  ChannelCreateEvent({required super.id, required this.streams});
 
-  factory StreamCreateEvent.fromJson(Map<String, dynamic> json) =>
-    _$StreamCreateEventFromJson(json);
+  factory ChannelCreateEvent.fromJson(Map<String, dynamic> json) =>
+    _$ChannelCreateEventFromJson(json);
 
   @override
-  Map<String, dynamic> toJson() => _$StreamCreateEventToJson(this);
+  Map<String, dynamic> toJson() => _$ChannelCreateEventToJson(this);
 }
 
-/// A [StreamEvent] with op `delete`: https://zulip.com/api/get-events#stream-delete
+/// A [ChannelEvent] with op `delete`: https://zulip.com/api/get-events#stream-delete
 @JsonSerializable(fieldRename: FieldRename.snake)
-class StreamDeleteEvent extends StreamEvent {
+class ChannelDeleteEvent extends ChannelEvent {
   @override
+  @JsonKey(includeToJson: true)
   String get op => 'delete';
 
   final List<ZulipStream> streams;
 
-  StreamDeleteEvent({required super.id, required this.streams});
+  ChannelDeleteEvent({required super.id, required this.streams});
 
-  factory StreamDeleteEvent.fromJson(Map<String, dynamic> json) =>
-    _$StreamDeleteEventFromJson(json);
+  factory ChannelDeleteEvent.fromJson(Map<String, dynamic> json) =>
+    _$ChannelDeleteEventFromJson(json);
 
   @override
-  Map<String, dynamic> toJson() => _$StreamDeleteEventToJson(this);
+  Map<String, dynamic> toJson() => _$ChannelDeleteEventToJson(this);
 }
 
-// TODO(#182) StreamUpdateEvent, for a [StreamEvent] with op `update`:
-//   https://zulip.com/api/get-events#stream-update
+/// A [ChannelEvent] with op `update`: https://zulip.com/api/get-events#stream-update
+@JsonSerializable(fieldRename: FieldRename.snake)
+class ChannelUpdateEvent extends ChannelEvent {
+  @override
+  @JsonKey(includeToJson: true)
+  String get op => 'update';
+
+  final int streamId;
+  final String name;
+
+  /// The name of the channel property, or null if we don't recognize it.
+  @JsonKey(unknownEnumValue: JsonKey.nullForUndefinedEnumValue)
+  final ChannelPropertyName? property;
+
+  /// The new value, or null if we don't recognize the property.
+  ///
+  /// This will have the type appropriate for [property]; for example,
+  /// if the property is boolean, then `value is bool` will always be true.
+  /// This invariant is enforced by [ChannelUpdateEvent.fromJson].
+  @JsonKey(readValue: _readValue)
+  final Object? value;
+
+  final String? renderedDescription;
+  final bool? historyPublicToSubscribers;
+  final bool? isWebPublic;
+
+  ChannelUpdateEvent({
+    required super.id,
+    required this.streamId,
+    required this.name,
+    required this.property,
+    required this.value,
+    this.renderedDescription,
+    this.historyPublicToSubscribers,
+    this.isWebPublic,
+  });
+
+  /// [value], with a check that its type corresponds to [property]
+  /// (e.g., `value as bool`).
+  static Object? _readValue(Map<dynamic, dynamic> json, String key) {
+    final value = json['value'];
+    switch (ChannelPropertyName.fromRawString(json['property'] as String)) {
+      case ChannelPropertyName.name:
+      case ChannelPropertyName.description:
+        return value as String;
+      case ChannelPropertyName.firstMessageId:
+        return value as int?;
+      case ChannelPropertyName.inviteOnly:
+        return value as bool;
+      case ChannelPropertyName.messageRetentionDays:
+        return value as int?;
+      case ChannelPropertyName.channelPostPolicy:
+        return ChannelPostPolicy.fromApiValue(value as int);
+      case ChannelPropertyName.streamWeeklyTraffic:
+        return value as int?;
+      case null:
+        return null;
+    }
+  }
+
+  factory ChannelUpdateEvent.fromJson(Map<String, dynamic> json) =>
+    _$ChannelUpdateEventFromJson(json);
+
+  @override
+  Map<String, dynamic> toJson() => _$ChannelUpdateEventToJson(this);
+}
+
+/// A Zulip event of type `subscription`.
+///
+/// The corresponding API docs are in several places for
+/// different values of `op`; see subclasses.
+sealed class SubscriptionEvent extends Event {
+  @override
+  @JsonKey(includeToJson: true)
+  String get type => 'subscription';
+
+  String get op;
+
+  SubscriptionEvent({required super.id});
+}
+
+/// A [SubscriptionEvent] with op `add`: https://zulip.com/api/get-events#subscription-add
+@JsonSerializable(fieldRename: FieldRename.snake)
+class SubscriptionAddEvent extends SubscriptionEvent {
+  @override
+  @JsonKey(includeToJson: true)
+  String get op => 'add';
+
+  final List<Subscription> subscriptions;
+
+  SubscriptionAddEvent({required super.id, required this.subscriptions});
+
+  factory SubscriptionAddEvent.fromJson(Map<String, dynamic> json) =>
+    _$SubscriptionAddEventFromJson(json);
+
+  @override
+  Map<String, dynamic> toJson() => _$SubscriptionAddEventToJson(this);
+}
+
+/// A [SubscriptionEvent] with op `remove`: https://zulip.com/api/get-events#subscription-remove
+@JsonSerializable(fieldRename: FieldRename.snake)
+class SubscriptionRemoveEvent extends SubscriptionEvent {
+  @override
+  @JsonKey(includeToJson: true)
+  String get op => 'remove';
+
+  @JsonKey(readValue: _readStreamIds)
+  final List<int> streamIds;
+
+  static List<int> _readStreamIds(Map<dynamic, dynamic> json, String key) {
+    return (json['subscriptions'] as List<dynamic>)
+      .map((e) => (e as Map<String, dynamic>)['stream_id'] as int)
+      .toList();
+  }
+
+  SubscriptionRemoveEvent({required super.id, required this.streamIds});
+
+  factory SubscriptionRemoveEvent.fromJson(Map<String, dynamic> json) =>
+    _$SubscriptionRemoveEventFromJson(json);
+
+  @override
+  Map<String, dynamic> toJson() => _$SubscriptionRemoveEventToJson(this);
+}
+
+/// A [SubscriptionEvent] with op `update`: https://zulip.com/api/get-events#subscription-update
+@JsonSerializable(fieldRename: FieldRename.snake)
+class SubscriptionUpdateEvent extends SubscriptionEvent {
+  @override
+  @JsonKey(includeToJson: true)
+  String get op => 'update';
+
+  final int streamId;
+
+  final SubscriptionProperty property;
+
+  /// The new value, or null if we don't recognize the setting.
+  ///
+  /// This will have the type appropriate for [property]; for example,
+  /// if the setting is boolean, then `value is bool` will always be true.
+  /// This invariant is enforced by [SubscriptionUpdateEvent.fromJson].
+  @JsonKey(readValue: _readValue)
+  final Object? value;
+
+  /// [value], with a check that its type corresponds to [property]
+  /// (e.g., `value as bool`).
+  static Object? _readValue(Map<dynamic, dynamic> json, String key) {
+    final value = json['value'];
+    switch (SubscriptionProperty.fromRawString(json['property'] as String)) {
+      case SubscriptionProperty.color:
+        final str = value as String;
+        assert(RegExp(r'^#[0-9a-f]{6}$').hasMatch(str));
+        return 0xff000000 | int.parse(str.substring(1), radix: 16);
+      case SubscriptionProperty.isMuted:
+      case SubscriptionProperty.inHomeView:
+      case SubscriptionProperty.pinToTop:
+      case SubscriptionProperty.desktopNotifications:
+      case SubscriptionProperty.audibleNotifications:
+      case SubscriptionProperty.pushNotifications:
+      case SubscriptionProperty.emailNotifications:
+      case SubscriptionProperty.wildcardMentionsNotify:
+        return value as bool;
+      case SubscriptionProperty.unknown:
+        return null;
+    }
+  }
+
+  SubscriptionUpdateEvent({
+    required super.id,
+    required this.streamId,
+    required this.property,
+    required this.value,
+  });
+
+  factory SubscriptionUpdateEvent.fromJson(Map<String, dynamic> json) =>
+    _$SubscriptionUpdateEventFromJson(json);
+
+  @override
+  Map<String, dynamic> toJson() => _$SubscriptionUpdateEventToJson(this);
+}
+
+/// The name of a property in [Subscription].
+///
+/// Used in handling of [SubscriptionUpdateEvent].
+@JsonEnum(fieldRename: FieldRename.snake, alwaysCreate: true)
+enum SubscriptionProperty {
+  /// As an int that dart:ui's Color constructor will take:
+  ///   <https://api.flutter.dev/flutter/dart-ui/Color/Color.html>
+  color,
+
+  isMuted,
+  inHomeView,
+  pinToTop,
+  desktopNotifications,
+  audibleNotifications,
+  pushNotifications,
+  emailNotifications,
+  wildcardMentionsNotify,
+  unknown;
+
+  static SubscriptionProperty fromRawString(String raw) => _byRawString[raw] ?? unknown;
+
+  static final _byRawString = _$SubscriptionPropertyEnumMap
+    .map((key, value) => MapEntry(value, key));
+}
+
+/// A [SubscriptionEvent] with op `peer_add`: https://zulip.com/api/get-events#subscription-peer_add
+@JsonSerializable(fieldRename: FieldRename.snake)
+class SubscriptionPeerAddEvent extends SubscriptionEvent {
+  @override
+  @JsonKey(includeToJson: true)
+  String get op => 'peer_add';
+
+  List<int> streamIds;
+  List<int> userIds;
+
+  SubscriptionPeerAddEvent({
+    required super.id,
+    required this.streamIds,
+    required this.userIds,
+  });
+
+  factory SubscriptionPeerAddEvent.fromJson(Map<String, dynamic> json) =>
+    _$SubscriptionPeerAddEventFromJson(json);
+
+  @override
+  Map<String, dynamic> toJson() => _$SubscriptionPeerAddEventToJson(this);
+}
+
+/// A [SubscriptionEvent] with op `peer_remove`: https://zulip.com/api/get-events#subscription-peer_remove
+@JsonSerializable(fieldRename: FieldRename.snake)
+class SubscriptionPeerRemoveEvent extends SubscriptionEvent {
+  @override
+  @JsonKey(includeToJson: true)
+  String get op => 'peer_remove';
+
+  List<int> streamIds;
+  List<int> userIds;
+
+  SubscriptionPeerRemoveEvent({
+    required super.id,
+    required this.streamIds,
+    required this.userIds,
+  });
+
+  factory SubscriptionPeerRemoveEvent.fromJson(Map<String, dynamic> json) =>
+    _$SubscriptionPeerRemoveEventFromJson(json);
+
+  @override
+  Map<String, dynamic> toJson() => _$SubscriptionPeerRemoveEventToJson(this);
+}
+
+/// A Zulip event of type `user_topic`: https://zulip.com/api/get-events#user_topic
+@JsonSerializable(fieldRename: FieldRename.snake)
+class UserTopicEvent extends Event {
+  @override
+  @JsonKey(includeToJson: true)
+  String get type => 'user_topic';
+
+  final int streamId;
+  final TopicName topicName;
+  final int lastUpdated;
+  final UserTopicVisibilityPolicy visibilityPolicy;
+
+  UserTopicEvent({
+    required super.id,
+    required this.streamId,
+    required this.topicName,
+    required this.lastUpdated,
+    required this.visibilityPolicy,
+  });
+
+  factory UserTopicEvent.fromJson(Map<String, dynamic> json) =>
+    _$UserTopicEventFromJson(json);
+
+  @override
+  Map<String, dynamic> toJson() => _$UserTopicEventToJson(this);
+}
 
 /// A Zulip event of type `message`: https://zulip.com/api/get-events#message
 // TODO use [JsonSerializable] here too, using its customization features,
 //   in order to skip the boilerplate in [fromJson] and [toJson].
 class MessageEvent extends Event {
   @override
+  @JsonKey(includeToJson: true)
   String get type => 'message';
 
   // In the server API, the `flags` field appears directly on the event rather
@@ -333,8 +678,8 @@ class MessageEvent extends Event {
   //
   // The other difference in the server API between message objects in these
   // events and in the get-messages results is that `matchContent` and
-  // `matchSubject` are absent here.  Already [Message.matchContent] and
-  // [Message.matchSubject] are optional, so no action is needed on that.
+  // `matchTopic` are absent here.  Already [Message.matchContent] and
+  // [Message.matchTopic] are optional, so no action is needed on that.
   final Message message;
 
   MessageEvent({required super.id, required this.message});
@@ -360,47 +705,58 @@ class MessageEvent extends Event {
 @JsonSerializable(fieldRename: FieldRename.snake)
 class UpdateMessageEvent extends Event {
   @override
+  @JsonKey(includeToJson: true)
   String get type => 'update_message';
 
   final int? userId; // TODO(server-5)
   final bool? renderingOnly; // TODO(server-5)
   final int messageId;
   final List<int> messageIds;
+
   final List<MessageFlag> flags;
   final int? editTimestamp; // TODO(server-5)
-  final String? streamName;
-  final int? streamId;
+
+  // final String? streamName; // ignore
+
+  @JsonKey(name: 'stream_id')
+  final int? origStreamId;
   final int? newStreamId;
+
   final PropagateMode? propagateMode;
-  final String? origSubject;
-  final String? subject;
+
+  @JsonKey(name: 'orig_subject')
+  final TopicName? origTopic;
+  @JsonKey(name: 'subject')
+  final TopicName? newTopic;
+
   // final List<TopicLink> topicLinks; // TODO handle
+
   final String? origContent;
   final String? origRenderedContent;
   // final int? prevRenderedContentVersion; // deprecated
   final String? content;
   final String? renderedContent;
+
   final bool? isMeMessage;
 
   UpdateMessageEvent({
     required super.id,
-    this.userId,
-    this.renderingOnly,
+    required this.userId,
+    required this.renderingOnly,
     required this.messageId,
     required this.messageIds,
     required this.flags,
-    this.editTimestamp,
-    this.streamName,
-    this.streamId,
-    this.newStreamId,
-    this.propagateMode,
-    this.origSubject,
-    this.subject,
-    this.origContent,
-    this.origRenderedContent,
-    this.content,
-    this.renderedContent,
-    this.isMeMessage,
+    required this.editTimestamp,
+    required this.origStreamId,
+    required this.newStreamId,
+    required this.propagateMode,
+    required this.origTopic,
+    required this.newTopic,
+    required this.origContent,
+    required this.origRenderedContent,
+    required this.content,
+    required this.renderedContent,
+    required this.isMeMessage,
   });
 
   factory UpdateMessageEvent.fromJson(Map<String, dynamic> json) =>
@@ -410,32 +766,28 @@ class UpdateMessageEvent extends Event {
   Map<String, dynamic> toJson() => _$UpdateMessageEventToJson(this);
 }
 
-/// As in [UpdateMessageEvent.propagateMode].
-@JsonEnum(fieldRename: FieldRename.snake)
-enum PropagateMode {
-  changeOne,
-  changeLater,
-  changeAll;
-}
-
 /// A Zulip event of type `delete_message`: https://zulip.com/api/get-events#delete_message
 @JsonSerializable(fieldRename: FieldRename.snake)
 class DeleteMessageEvent extends Event {
   @override
+  @JsonKey(includeToJson: true)
   String get type => 'delete_message';
 
   final List<int> messageIds;
   // final int messageId; // Not present; we support the bulk_message_deletion capability
+  // The server never actually sends "direct" here yet (it's "private" instead),
+  // but we accept both forms for forward-compatibility.
+  @MessageTypeConverter()
   final MessageType messageType;
   final int? streamId;
-  final String? topic;
+  final TopicName? topic;
 
   DeleteMessageEvent({
     required super.id,
     required this.messageIds,
     required this.messageType,
-    this.streamId,
-    this.topic,
+    required this.streamId,
+    required this.topic,
   });
 
   factory DeleteMessageEvent.fromJson(Map<String, dynamic> json) {
@@ -452,12 +804,28 @@ class DeleteMessageEvent extends Event {
   Map<String, dynamic> toJson() => _$DeleteMessageEventToJson(this);
 }
 
-/// As in [DeleteMessageEvent.messageType]
-/// or [UpdateMessageFlagsMessageDetail.type].
-@JsonEnum(fieldRename: FieldRename.snake)
+/// As in [DeleteMessageEvent.messageType],
+/// [UpdateMessageFlagsMessageDetail.type],
+/// or [TypingEvent.messageType].
+@JsonEnum(alwaysCreate: true)
 enum MessageType {
   stream,
-  private;
+  direct;
+}
+
+class MessageTypeConverter extends JsonConverter<MessageType, String> {
+  const MessageTypeConverter();
+
+  @override
+  MessageType fromJson(String json) {
+    if (json == 'private') json = 'direct'; // TODO(server-future)
+    return $enumDecode(_$MessageTypeEnumMap, json);
+  }
+
+  @override
+  String toJson(MessageType object) {
+    return _$MessageTypeEnumMap[object]!;
+  }
 }
 
 /// A Zulip event of type `update_message_flags`.
@@ -485,6 +853,7 @@ sealed class UpdateMessageFlagsEvent extends Event {
 @JsonSerializable(fieldRename: FieldRename.snake)
 class UpdateMessageFlagsAddEvent extends UpdateMessageFlagsEvent {
   @override
+  @JsonKey(includeToJson: true)
   String get op => 'add';
 
   final bool all;
@@ -507,6 +876,7 @@ class UpdateMessageFlagsAddEvent extends UpdateMessageFlagsEvent {
 @JsonSerializable(fieldRename: FieldRename.snake)
 class UpdateMessageFlagsRemoveEvent extends UpdateMessageFlagsEvent {
   @override
+  @JsonKey(includeToJson: true)
   String get op => 'remove';
 
   // final bool all; // deprecated, ignore
@@ -539,11 +909,14 @@ class UpdateMessageFlagsRemoveEvent extends UpdateMessageFlagsEvent {
 /// As in [UpdateMessageFlagsRemoveEvent.messageDetails].
 @JsonSerializable(fieldRename: FieldRename.snake)
 class UpdateMessageFlagsMessageDetail {
+  // The server never actually sends "direct" here yet (it's "private" instead),
+  // but we accept both forms for forward-compatibility.
+  @MessageTypeConverter()
   final MessageType type;
   final bool? mentioned;
   final List<int>? userIds;
   final int? streamId;
-  final String? topic;
+  final TopicName? topic;
 
   UpdateMessageFlagsMessageDetail({
     required this.type,
@@ -560,13 +933,113 @@ class UpdateMessageFlagsMessageDetail {
       case MessageType.stream:
         result.streamId as int;
         result.topic as String;
-      case MessageType.private:
+      case MessageType.direct:
         result.userIds as List<int>;
     }
     return result;
   }
 
   Map<String, dynamic> toJson() => _$UpdateMessageFlagsMessageDetailToJson(this);
+}
+
+/// A Zulip event of type `submessage`: https://zulip.com/api/get-events#submessage
+@JsonSerializable(fieldRename: FieldRename.snake)
+class SubmessageEvent extends Event {
+  @override
+  @JsonKey(includeToJson: true)
+  String get type => 'submessage';
+
+  @JsonKey(unknownEnumValue: SubmessageType.unknown)
+  final SubmessageType msgType;
+  /// [SubmessageData] encoded in JSON.
+  // We cannot parse the String into one of the [SubmessageData] classes because
+  // information from other submessages are required. Specifically, we need
+  // the parsed [WidgetData] from the first [Message.submessages] of the
+  // corresponding message.
+  final String content;
+  final int messageId;
+  final int senderId;
+  final int submessageId;
+
+  SubmessageEvent({
+    required super.id,
+    required this.msgType,
+    required this.content,
+    required this.messageId,
+    required this.senderId,
+    required this.submessageId,
+  });
+
+  factory SubmessageEvent.fromJson(Map<String, dynamic> json) =>
+    _$SubmessageEventFromJson(json);
+
+  @override
+  Map<String, dynamic> toJson() => _$SubmessageEventToJson(this);
+}
+
+/// A Zulip event of type `typing`:
+///   https://zulip.com/api/get-events#typing-start
+///   https://zulip.com/api/get-events#typing-stop
+@JsonSerializable(fieldRename: FieldRename.snake)
+class TypingEvent extends Event {
+  @override
+  @JsonKey(includeToJson: true)
+  String get type => 'typing';
+
+  final TypingOp op;
+  @MessageTypeConverter()
+  final MessageType messageType;
+  @JsonKey(readValue: _readSenderId)
+  final int senderId;
+  @JsonKey(name: 'recipients', fromJson: _recipientIdsFromJson)
+  final List<int>? recipientIds;
+  final int? streamId;
+  final TopicName? topic;
+
+  TypingEvent({
+    required super.id,
+    required this.op,
+    required this.messageType,
+    required this.senderId,
+    required this.recipientIds,
+    required this.streamId,
+    required this.topic,
+  }) : assert(recipientIds == null || isSortedWithoutDuplicates(recipientIds));
+
+  static Object? _readSenderId(Map<Object?, Object?> json, String key) {
+    return (json['sender'] as Map<String, dynamic>)['user_id'];
+  }
+
+  static List<int>? _recipientIdsFromJson(Object? json) {
+    if (json == null) return null;
+    return (json as List<Object?>).map(
+      (item) => (item as Map<String, Object?>)['user_id'] as int).toList()..sort();
+  }
+
+  factory TypingEvent.fromJson(Map<String, dynamic> json) {
+    final result = _$TypingEventFromJson(json);
+    // Crunchy-shell validation
+    switch (result.messageType) {
+      case MessageType.stream:
+        result.streamId as int;
+        result.topic as String;
+      case MessageType.direct:
+        result.recipientIds as List<int>;
+    }
+    return result;
+  }
+
+  @override
+  Map<String, dynamic> toJson() => _$TypingEventToJson(this);
+}
+
+/// As in [TypingEvent.op].
+@JsonEnum(fieldRename: FieldRename.snake)
+enum TypingOp {
+  start,
+  stop;
+
+  String toJson() => _$TypingOpEnumMap[this]!;
 }
 
 /// A Zulip event of type `reaction`, with op `add` or `remove`.
